@@ -1,0 +1,30 @@
+plugins {
+    id 'java'
+}
+
+group = 'ru.alejov'
+version = '1.0-SNAPSHOT'
+
+sourceCompatibility = JavaVersion.VERSION_21
+targetCompatibility = JavaVersion.VERSION_21
+[compileJava, compileTestJava]*.options*.encoding = 'UTF-8'
+
+repositories {
+    mavenCentral()
+    maven {
+        url "https://plugins.gradle.org/m2/"
+    }
+}
+
+dependencies {
+    compileOnly("com.google.code.findbugs:jsr305:3.0.2")
+
+    implementation "org.postgresql:postgresql:$postgresVersion"
+
+    testImplementation platform('org.junit:junit-bom:5.10.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+}
+
+test {
+    useJUnitPlatform()
+}
