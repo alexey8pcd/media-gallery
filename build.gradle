@@ -20,6 +20,8 @@ dependencies {
     compileOnly("com.google.code.findbugs:jsr305:3.0.2")
 
     implementation "org.postgresql:postgresql:$postgresVersion"
+    implementation "org.apache.commons:commons-imaging:$commonsImagingVersion"
+    implementation "com.fasterxml.jackson.core:jackson-databind:$jacksonVersion"
 
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'
