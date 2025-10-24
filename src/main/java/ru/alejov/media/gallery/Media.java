@@ -6,7 +6,7 @@ import java.util.Map;
 import java.util.Objects;
 
 public final class Media {
-    private final String name;
+    private String name;
     private final Timestamp createdAt;
     private final Map<String, String> paths;
     private String md5Hash;
@@ -103,4 +103,5 @@ public final class Media {
             md5Hash = HashUtils.getMd5Hash(localPath);
         }
     }
+
 }
