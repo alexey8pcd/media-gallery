@@ -22,7 +22,7 @@ public class DateUtils {
     static final DateTimeFormatter DATE_SHORT_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd");
 
     @Nullable
-    public static Timestamp getCreateDate(Map<String, String> tags, String fileName) {
+    public static Timestamp getCreateDate(Map<MetaTag, String> tags, String fileName) {
         Matcher dateFullMatcher = DateUtils.DATE_FULL_PATTERN.matcher(fileName);
         if (dateFullMatcher.find()) {
             String dateFull = dateFullMatcher.group(1);
@@ -32,13 +32,12 @@ public class DateUtils {
             } catch (DateTimeParseException ignored) {
             }
         } else {
-            String dateTimeOriginal = tags.get("DateTimeOriginal");
+            String dateTimeOriginal = tags.get(MetaTag.DateTimeOriginal);
             Timestamp createDate = null;
             if (dateTimeOriginal != null) {
                 createDate = parseDateTimeMetadata(dateTimeOriginal);
             }
             if (createDate == null) {
-
                 Matcher dateShortMatcher = DateUtils.DATE_SHORT_PATTERN.matcher(fileName);
                 if (dateShortMatcher.find()) {
                     String dateShort = dateShortMatcher.group(1);
@@ -61,7 +60,7 @@ public class DateUtils {
             LocalDateTime localDateTime = LocalDateTime.parse(removed, DateUtils.DATE_FULL_FORMAT2);
             return Timestamp.valueOf(localDateTime);
         } catch (DateTimeParseException e) {
-            System.out.println(e);
+            e.printStackTrace();
         }
         return null;
     }
