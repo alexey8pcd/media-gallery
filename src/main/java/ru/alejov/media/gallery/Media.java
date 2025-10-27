@@ -5,15 +5,16 @@ import java.sql.Timestamp;
 import java.util.Map;
 import java.util.Objects;
 
-public final class Media {
-    private String name;
+public final class Media implements Comparable<Media> {
+    private final String name;
     private final Timestamp createdAt;
     private final Map<String, String> paths;
-    private String md5Hash;
     private final long size;
     private final String type;
     private final Map<MetaTag, String> metadata;
+    private String md5Hash;
     private transient final Path localPath;
+    private transient final String nameToSort;
 
     public Media(String name,
                  Timestamp createdAt,
@@ -31,6 +32,7 @@ public final class Media {
         this.type = type;
         this.metadata = metadata;
         this.localPath = localPath;
+        this.nameToSort = name.replace("_", "").replace("-", "");
     }
 
     public String name() {
@@ -104,4 +106,8 @@ public final class Media {
         }
     }
 
+    @Override
+    public int compareTo(Media o) {
+        return nameToSort.compareTo(o.nameToSort);
+    }
 }

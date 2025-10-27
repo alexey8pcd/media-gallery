@@ -1,5 +1,7 @@
 package ru.alejov.media.gallery.init;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import ru.alejov.media.gallery.DateUtils;
 import ru.alejov.media.gallery.Media;
 import ru.alejov.media.gallery.MetaTag;
@@ -23,7 +25,6 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDateTime;
 import java.util.*;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -31,6 +32,7 @@ import java.util.stream.Stream;
 
 public class FillContentHelper {
 
+    private static final Logger log;
 
     private static final String PRIMARY_FILL = "--primary-fill";
     private static final String INCREMENTAL_FILL = "--incremental-fill";
@@ -40,17 +42,12 @@ public class FillContentHelper {
     private static final String PARALLEL = "parallel";
     private static final String CALCULATE_MD5 = "calculateMD5";
 
-    private static final PrintStream outStream;
-    private static final PrintStream errorStream;
     private static final Predicate<Path> IS_FILE = (Path path) -> !Files.isDirectory(path);
 
     static {
-        try {
-            outStream = new PrintStream(System.out, true, StandardCharsets.UTF_8.name());
-            errorStream = new PrintStream(System.err, true, StandardCharsets.UTF_8.name());
-        } catch (UnsupportedEncodingException e) {
-            throw new RuntimeException(e);
-        }
+        System.setProperty("org.slf4j.simpleLogger.showDateTime", "true");
+        System.setProperty("org.slf4j.simpleLogger.dateTimeFormat", "yyyy-MM-dd HH:mm:ss.SSS");
+        log = LoggerFactory.getLogger(FillContentHelper.class);
     }
 
     //--primary-fill rootDir="rootDirectory" [pgSettingsPath="path to jdbc.properties"] [parallel=true] [calculateMD5=true]
@@ -74,56 +71,47 @@ public class FillContentHelper {
                 boolean calculateMd5 = Boolean.parseBoolean(params.getOrDefault(CALCULATE_MD5, "false"));
                 incrementalFill(rootDir, pgSettingsPath, parallel, calculateMd5);
             } else {
-                outStream.printf("Unknown command. Only %s is supported now", Arrays.asList(PRIMARY_FILL, INCREMENTAL_FILL));
+                log.warn("Unknown command. Only {} is supported now", Arrays.asList(PRIMARY_FILL, INCREMENTAL_FILL));
             }
         } catch (Exception e) {
-            errorStream.println("Error detected: " + e);
-            e.printStackTrace(errorStream);
+            log.error(e.toString(), e);
         }
     }
 
     private static void incrementalFill(String rootDirectory, String jdbcPropertiesFile, boolean parallel, boolean calculateMd5) throws IOException, SQLException {
-        outStream.println("Start incrementalFill(parallel=" + parallel + ") at " + LocalDateTime.now());
+        log.info("Start incrementalFill(parallel={})", parallel);
         Properties supportedExtensions = getSupportedExtensions();
         Set<String> unsupportedExtensions = new LinkedHashSet<>();
         String hostName = getHostName();
         List<Media> mediaList = collectMedia(rootDirectory, parallel, supportedExtensions, unsupportedExtensions, hostName);
         if (!unsupportedExtensions.isEmpty()) {
-            outStream.println("Unsupported extensions: " + unsupportedExtensions);
+            log.warn("Unsupported extensions: {}", unsupportedExtensions);
         }
         if (calculateMd5) {
             calculateMd5(parallel, mediaList);
         }
-        outStream.println("Finish incrementalFill(parallel=" + parallel + ") at " + LocalDateTime.now());
+        log.info("Finish incrementalFill(parallel={})", parallel);
         if (jdbcPropertiesFile != null) {
-            outStream.println("Start mergeToDatabase at " + LocalDateTime.now());
-            int updatedRows = PgHelper.mergeToDatabase(jdbcPropertiesFile, mediaList);
-            outStream.println("Finish mergeToDatabase at " + LocalDateTime.now() + ", added rows: " + updatedRows);
+            new PgHelper(log).mergeToDatabase(jdbcPropertiesFile, mediaList);
         }
     }
 
     private static void primaryFill(String rootDirectory, String jdbcPropertiesFile, boolean parallel, boolean calculateMd5) throws IOException, SQLException {
-        outStream.println("Start primaryFill(parallel=" + parallel + ") at " + LocalDateTime.now());
+        log.info("Start primaryFill(parallel={})", parallel);
         Properties supportedExtensions = getSupportedExtensions();
         Set<String> unsupportedExtensions = new LinkedHashSet<>();
         String hostName = getHostName();
         List<Media> mediaList = collectMedia(rootDirectory, parallel, supportedExtensions, unsupportedExtensions, hostName);
         if (!unsupportedExtensions.isEmpty()) {
-            outStream.println("Unsupported extensions: " + unsupportedExtensions);
+            log.warn("Unsupported extensions: {}", unsupportedExtensions);
         }
         if (calculateMd5) {
             calculateMd5(parallel, mediaList);
         }
         if (jdbcPropertiesFile != null) {
-            outStream.println("Start fillEmptyDatabase at " + LocalDateTime.now());
-            boolean filled = PgHelper.fillEmptyDatabase(jdbcPropertiesFile, mediaList);
-            if (filled) {
-                outStream.println("Finish fillEmptyDatabase at " + LocalDateTime.now());
-            } else {
-                outStream.println("Database not empty, use command: " + INCREMENTAL_FILL);
-            }
+            boolean filled = new PgHelper(log).fillEmptyDatabase(jdbcPropertiesFile, mediaList);
         }
-        outStream.println("Finish primaryFill at " + LocalDateTime.now());
+        log.info("Finish primaryFill");
     }
 
     private static String getHostName() throws UnknownHostException {
@@ -142,19 +130,18 @@ public class FillContentHelper {
                                   .filter(IS_FILE)
                                   .map((Path path) -> processMedia(path, supportedExtensions, unsupportedExtensions, systemName))
                                   .filter(Objects::nonNull)
-                                  .sorted(Comparator.comparing(Media::name))
+                                  .sorted()
                                   .collect(Collectors.toList());
             } else {
                 mediaList = stream.filter(IS_FILE)
                                   .map((Path path) -> processMedia(path, supportedExtensions, unsupportedExtensions, systemName))
                                   .filter(Objects::nonNull)
-                                  .limit(1)
-                                  .sorted(Comparator.comparing(Media::name))
+                                  .sorted()
                                   .collect(Collectors.toList());
             }
 
         }
-        outStream.printf("Find %d files\n", mediaList.size());
+        log.info("Find {} files", mediaList.size());
         return mediaList;
     }
 
@@ -167,14 +154,14 @@ public class FillContentHelper {
     }
 
     private static void calculateMd5(boolean parallel, List<Media> mediaList) {
-        outStream.printf("Calculate MD5 for %d files\n", mediaList.size());
+        log.info("Calculate MD5 for {} files", mediaList.size());
         Instant begin = Instant.now();
         if (parallel) {
             mediaList.parallelStream()
                      .forEach(Media::calculateMd5);
         }
         Duration duration = Duration.between(begin, Instant.now());
-        outStream.println("MD5 calculated at " + duration.toString().replace("PT", ""));
+        log.info("MD5 calculated at {}", duration.toString().replace("PT", ""));
     }
 
     @Nullable
@@ -201,8 +188,9 @@ public class FillContentHelper {
                 FileTime creationTime = attributes.creationTime();
                 createDate = Timestamp.from(creationTime.toInstant());
             }
-            String md5Hash = null;
-            media = new Media(fileName, createDate, Collections.singletonMap(systemName, path.toString()), md5Hash, path.toFile().length(), type, metadata, path);
+            Path absolutePath = path.toAbsolutePath();
+            Map<String, String> paths = Collections.singletonMap(systemName, absolutePath.toString());
+            media = new Media(fileName, createDate, paths, null, path.toFile().length(), type, metadata, absolutePath);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
