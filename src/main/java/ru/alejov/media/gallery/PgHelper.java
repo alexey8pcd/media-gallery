@@ -14,6 +14,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.sql.Types;
 import java.util.Iterator;
 import java.util.List;
@@ -27,8 +28,8 @@ public class PgHelper {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final String INSERT_SQL = ""
-                                             + "INSERT INTO media(name, create_date, metadata, paths, type, file_size, hash_md5)\n"
-                                             + "VALUES (?, ?, ?::jsonb, ?::jsonb, ?, ?, ?)\n"
+                                             + "INSERT INTO media(name, create_date, metadata, paths, type, file_size, hash_md5, last_modify)\n"
+                                             + "VALUES (?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?)\n"
                                              + "RETURNING id";
     private static final String TEST_SELECT = ""
                                               + "SELECT name\n"
@@ -37,6 +38,7 @@ public class PgHelper {
     private static final String SELECT_SQL = ""
                                              + "SELECT id,\n"
                                              + "       name,\n"
+                                             + "       last_modify,\n"
                                              + "       replace(replace(name,'-',''),'_','') AS name_to_sort,\n"
                                              + "       file_size,\n"
                                              + "       hash_md5,\n"
@@ -63,7 +65,7 @@ public class PgHelper {
     }
 
 
-    public boolean fillEmptyDatabase(String jdbcPropertiesFilePath, List<Media> mediaList) throws IOException, SQLException {
+    public void fillEmptyDatabase(String jdbcPropertiesFilePath, List<Media> mediaList) throws IOException, SQLException {
         log.info("Start fillEmptyDatabase");
         Properties properties = new Properties();
         try (InputStream inputStream = Files.newInputStream(Paths.get(jdbcPropertiesFilePath))) {
@@ -101,11 +103,10 @@ public class PgHelper {
         } else {
             log.warn("Database not empty");
         }
-        return filled;
     }
 
     @SuppressWarnings("StatementWithEmptyBody")
-    public void mergeToDatabase(String jdbcPropertiesFilePath, List<Media> mediaList) throws IOException, SQLException {
+    public void mergeToDatabase(String jdbcPropertiesFilePath, List<Media> mediaList, String hostName) throws IOException, SQLException {
         log.info("Start mergeToDatabase");
         if (mediaList.isEmpty()) {
             return;
@@ -135,7 +136,7 @@ public class PgHelper {
                 try (ResultSet resultSet = selectStatement.executeQuery()) {
                     DbMedia dbMedia = nextFromDb(resultSet);
                     while (dbMedia != null && media != null) {
-                        int compared = media.name().compareTo(dbMedia.name);
+                        int compared = media.getName().compareTo(dbMedia.name);
                         if (compared == 0) {
                             mergeSameFiles(media, dbMedia, updatePathsStmt, updateMd5Statement, updateNameStmt, insertStmt, insertedCount, updatedCount);
                             dbMedia = nextFromDb(resultSet);
@@ -143,6 +144,7 @@ public class PgHelper {
                         } else if (compared > 0) {
                             //Файл в памяти больше, чем в базе - возможно файл удалили. Но он может быть на другом устройстве.
                             //Ничего не делаем, выбираем следующий из базы
+                            logFileNotExists(hostName, dbMedia);
                             dbMedia = nextFromDb(resultSet);
                         } else {
                             //Файл в базе больше, чем в памяти. Файл надо добавить.
@@ -179,7 +181,16 @@ public class PgHelper {
                 connection.commit();
             }
         }
-        log.info("Finish mergeToDatabase. Inserted rows: " + insertedCount + ", updated rows: " + updatedCount);
+        log.info("Finish mergeToDatabase. Inserted rows: {}, updated rows: {}", insertedCount, updatedCount);
+    }
+
+    private void logFileNotExists(String hostName, DbMedia dbMedia) {
+        String path = dbMedia.paths.get(hostName);
+        if (path != null) {
+            log.warn("File '{}' not exists in current device by path: '{}'", dbMedia.name, path);
+        } else {
+            log.warn("File '{}' from another device", dbMedia.name);
+        }
     }
 
     @SuppressWarnings("StatementWithEmptyBody")
@@ -192,10 +203,10 @@ public class PgHelper {
                                 AtomicInteger insertedCount,
                                 AtomicInteger updatedCount) throws SQLException, JsonProcessingException {
         //Записи одинаковые. Проверяем fileSize и md5
-        if (media.size() == dbMedia.fileSize) {
-            if (Objects.equals(media.md5Hash(), dbMedia.md5Hash)) {
+        if (media.getSize() == dbMedia.fileSize) {
+            if (media.getLastModify().equals(dbMedia.lastModify) || Objects.equals(media.getMd5Hash(), dbMedia.md5Hash)) {
                 //записи абсолютно одинаковые, допишем путь, если это другое устройство
-                Map<String, String> paths = media.paths();
+                Map<String, String> paths = media.getPaths();
                 String device = paths.keySet().iterator().next();
                 if (!dbMedia.paths.containsKey(device)) {
                     dbMedia.paths.putAll(paths);
@@ -207,10 +218,10 @@ public class PgHelper {
                 }
             } else if (dbMedia.md5Hash == null) {
                 //допишем в БД md5
-                updateMd5Statement.setString(1, media.md5Hash());
+                updateMd5Statement.setString(1, media.getMd5Hash());
                 updateMd5Statement.setLong(2, dbMedia.id);
                 updateMd5Statement.executeUpdate();
-                log.info("File '{}' merged with MD5: {}", dbMedia.name, media.md5Hash());
+                log.info("File '{}' merged with MD5: {}", dbMedia.name, media.getMd5Hash());
                 updatedCount.incrementAndGet();
             } else {
                 //в базе есть хеш, в памяти нет, пропускаем
@@ -226,7 +237,7 @@ public class PgHelper {
             log.info("File with ID: {}, name: '{}' in database in obsolete. Renamed to '{}'", dbMedia.id, dbMedia.name, newName);
             fillInsertStatement(media, insertStmt);
             insertStmt.execute();
-            log.info("File '{}' inserted", media.name());
+            log.info("File '{}' inserted", media.getName());
             insertedCount.incrementAndGet();
         }
     }
@@ -257,7 +268,7 @@ public class PgHelper {
         while (mediaIterator.hasNext()) {
             Media media = mediaIterator.next();
             fillInsertStatement(media, insertStmt);
-            log.info("File '{}' inserted", media.name());
+            log.info("File '{}' inserted", media.getName());
             insertStmt.addBatch();
             ++total;
             ++batch;
@@ -276,13 +287,15 @@ public class PgHelper {
         public final String name;
         public final long fileSize;
         public final String md5Hash;
+        public final Timestamp lastModify;
         public final Map<String, String> paths;
 
-        public DbMedia(long id, String name, long fileSize, String md5Hash, Map<String, String> paths) {
+        public DbMedia(long id, String name, long fileSize, String md5Hash, Timestamp lastModify, Map<String, String> paths) {
             this.id = id;
             this.name = name;
             this.fileSize = fileSize;
             this.md5Hash = md5Hash;
+            this.lastModify = lastModify;
             this.paths = paths;
         }
 
@@ -292,8 +305,9 @@ public class PgHelper {
             long fileSize = resultSet.getLong("file_size");
             String md5Hash = resultSet.getString("hash_md5");
             String pathsAsString = resultSet.getString("paths");
+            Timestamp lastModify = resultSet.getTimestamp("last_modify");
             Map<String, String> map = OBJECT_MAPPER.readValue(pathsAsString, Map.class);
-            return new DbMedia(id, name, fileSize, md5Hash, map);
+            return new DbMedia(id, name, fileSize, md5Hash, lastModify, map);
         }
 
         @Override
@@ -302,24 +316,26 @@ public class PgHelper {
                    "id=" + id +
                    ", name='" + name + '\'' +
                    ", fileSize=" + fileSize +
+                   ", lastModify=" + lastModify +
                    ", md5Hash='" + md5Hash + '\'' +
                    '}';
         }
     }
 
     private static void fillInsertStatement(Media media, PreparedStatement preparedStatement) throws SQLException, JsonProcessingException {
-        preparedStatement.setString(1, media.name());
-        preparedStatement.setTimestamp(2, media.createdAt());
-        preparedStatement.setString(3, OBJECT_MAPPER.writeValueAsString(media.metadata()));
-        preparedStatement.setString(4, OBJECT_MAPPER.writeValueAsString(media.paths()));
-        preparedStatement.setString(5, media.type());
-        preparedStatement.setLong(6, media.size());
-        String md5Hash = media.md5Hash();
+        preparedStatement.setString(1, media.getName());
+        preparedStatement.setTimestamp(2, media.getCreatedAt());
+        preparedStatement.setString(3, OBJECT_MAPPER.writeValueAsString(media.getMetadata()));
+        preparedStatement.setString(4, OBJECT_MAPPER.writeValueAsString(media.getPaths()));
+        preparedStatement.setString(5, media.getType());
+        preparedStatement.setLong(6, media.getSize());
+        String md5Hash = media.getMd5Hash();
         if (md5Hash != null) {
             preparedStatement.setString(7, md5Hash);
         } else {
             preparedStatement.setNull(7, Types.VARCHAR);
         }
+        preparedStatement.setTimestamp(8, media.getLastModify());
     }
 
     private static String toLogPath(Map<String, String> paths) {

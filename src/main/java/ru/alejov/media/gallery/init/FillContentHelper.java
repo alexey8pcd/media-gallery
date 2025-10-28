@@ -3,11 +3,13 @@ package ru.alejov.media.gallery.init;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import ru.alejov.media.gallery.DateUtils;
+import ru.alejov.media.gallery.JsonWriteHelper;
 import ru.alejov.media.gallery.Media;
 import ru.alejov.media.gallery.MetaTag;
 import ru.alejov.media.gallery.MetadataUtils;
 import ru.alejov.media.gallery.PgHelper;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.io.InputStream;
@@ -36,21 +38,29 @@ public class FillContentHelper {
 
     private static final String PRIMARY_FILL = "--primary-fill";
     private static final String INCREMENTAL_FILL = "--incremental-fill";
+    private static final String HELP = "--help";
 
-    private static final String ROOT_DIR = "rootDir";
-    private static final String PG_SETTINGS_PATH = "pgSettingsPath";
+    private static final String ROOT_DIR = "root-dir";
+    private static final String PG_SETTINGS_PATH = "pg-settings-path";
     private static final String PARALLEL = "parallel";
-    private static final String CALCULATE_MD5 = "calculateMD5";
+    private static final String CALCULATE_MD5 = "calculate-hash";
 
     private static final Predicate<Path> IS_FILE = (Path path) -> !Files.isDirectory(path);
 
     static {
-        System.setProperty("org.slf4j.simpleLogger.showDateTime", "true");
+        try {
+            System.setOut(new PrintStream(System.out, true, StandardCharsets.UTF_8.name()));
+        } catch (UnsupportedEncodingException e) {
+            throw new RuntimeException(e);
+        }
+        System.setProperty("org.slf4j.simpleLogger.showThreadName", "true");
+        System.setProperty("org.slf4j.simpleLogger.showThreadId", "false");
         System.setProperty("org.slf4j.simpleLogger.dateTimeFormat", "yyyy-MM-dd HH:mm:ss.SSS");
+        System.setProperty("org.slf4j.simpleLogger.logFile", "System.out");
         log = LoggerFactory.getLogger(FillContentHelper.class);
     }
 
-    //--primary-fill rootDir="rootDirectory" [pgSettingsPath="path to jdbc.properties"] [parallel=true] [calculateMD5=true]
+    //--primary-fill root-dir="rootDirectory" [pg-settings-path="path to jdbc.properties"] [parallel=true] [calculate-hash=true]
     public static void main(String[] args) {
         try {
             Map<String, String> params = new HashMap<>();
@@ -60,18 +70,28 @@ public class FillContentHelper {
             }
             if (params.containsKey(PRIMARY_FILL)) {
                 String rootDir = params.get(ROOT_DIR);
-                String pgSettingsPath = params.get(PG_SETTINGS_PATH);
-                boolean parallel = Boolean.parseBoolean(params.getOrDefault(PARALLEL, "false"));
-                boolean calculateMd5 = Boolean.parseBoolean(params.getOrDefault(CALCULATE_MD5, "false"));
-                primaryFill(rootDir, pgSettingsPath, parallel, calculateMd5);
+                if (rootDir != null) {
+                    String pgSettingsPath = params.get(PG_SETTINGS_PATH);
+                    boolean parallel = Boolean.parseBoolean(params.getOrDefault(PARALLEL, "false"));
+                    boolean calculateMd5 = Boolean.parseBoolean(params.getOrDefault(CALCULATE_MD5, "false"));
+                    primaryFill(rootDir, pgSettingsPath, parallel, calculateMd5);
+                } else {
+                    System.out.println("Missing parameter: " + ROOT_DIR);
+                }
             } else if (params.containsKey(INCREMENTAL_FILL)) {
                 String rootDir = params.get(ROOT_DIR);
-                String pgSettingsPath = params.get(PG_SETTINGS_PATH);
-                boolean parallel = Boolean.parseBoolean(params.getOrDefault(PARALLEL, "false"));
-                boolean calculateMd5 = Boolean.parseBoolean(params.getOrDefault(CALCULATE_MD5, "false"));
-                incrementalFill(rootDir, pgSettingsPath, parallel, calculateMd5);
+                if (rootDir != null) {
+                    String pgSettingsPath = params.get(PG_SETTINGS_PATH);
+                    boolean parallel = Boolean.parseBoolean(params.getOrDefault(PARALLEL, "false"));
+                    boolean calculateMd5 = Boolean.parseBoolean(params.getOrDefault(CALCULATE_MD5, "false"));
+                    incrementalFill(rootDir, pgSettingsPath, parallel, calculateMd5);
+                } else {
+                    System.out.println("Missing parameter: " + ROOT_DIR);
+                }
+            } else if (params.containsKey(HELP)) {
+                System.out.println("Example: [--primary-fill | --incremental-fill] root-dir=\"rootDirectory\" [pg-settings-path=\"path to jdbc.properties\"] [parallel=true] [calculate-hash=true]");
             } else {
-                log.warn("Unknown command. Only {} is supported now", Arrays.asList(PRIMARY_FILL, INCREMENTAL_FILL));
+                System.out.println("Unknown command. Only " + Arrays.asList(PRIMARY_FILL, INCREMENTAL_FILL, HELP) + " is supported now");
             }
         } catch (Exception e) {
             log.error(e.toString(), e);
@@ -92,7 +112,7 @@ public class FillContentHelper {
         }
         log.info("Finish incrementalFill(parallel={})", parallel);
         if (jdbcPropertiesFile != null) {
-            new PgHelper(log).mergeToDatabase(jdbcPropertiesFile, mediaList);
+            new PgHelper(log).mergeToDatabase(jdbcPropertiesFile, mediaList, hostName);
         }
     }
 
@@ -109,7 +129,9 @@ public class FillContentHelper {
             calculateMd5(parallel, mediaList);
         }
         if (jdbcPropertiesFile != null) {
-            boolean filled = new PgHelper(log).fillEmptyDatabase(jdbcPropertiesFile, mediaList);
+            new PgHelper(log).fillEmptyDatabase(jdbcPropertiesFile, mediaList);
+        } else {
+            new JsonWriteHelper(log).toJsonFile(mediaList);
         }
         log.info("Finish primaryFill");
     }
@@ -177,24 +199,24 @@ public class FillContentHelper {
         }
     }
 
+    @Nonnull
     private static Media getMedia(Path path, String fileName, String type, String systemName) {
-        Media media;
         try {
             Map<MetaTag, String> metadata = MetadataUtils.getMetadata(path, type);
 
             Timestamp createDate = DateUtils.getCreateDate(metadata, fileName);
+            BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class);
             if (createDate == null) {
-                BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class);
                 FileTime creationTime = attributes.creationTime();
                 createDate = Timestamp.from(creationTime.toInstant());
             }
+            Timestamp lastModify = Timestamp.from(attributes.lastModifiedTime().toInstant());
             Path absolutePath = path.toAbsolutePath();
             Map<String, String> paths = Collections.singletonMap(systemName, absolutePath.toString());
-            media = new Media(fileName, createDate, paths, null, path.toFile().length(), type, metadata, absolutePath);
+            return new Media(fileName, createDate, lastModify, paths, null, path.toFile().length(), type, metadata, absolutePath);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
-        return media;
     }
 
 
