@@ -7,6 +7,9 @@ import java.nio.file.Path;
 import java.sql.Timestamp;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static ru.alejov.media.gallery.init.FillContentHelper.log;
 
 public final class Media implements Comparable<Media> {
     private final String name;
@@ -114,9 +117,14 @@ public final class Media implements Comparable<Media> {
         return lastModify;
     }
 
-    public void calculateMd5() {
+    public void calculateMd5(int threshold, AtomicInteger toThreshold, AtomicInteger progress, int totalSize) {
         if (md5Hash == null) {
             md5Hash = HashUtils.getMd5Hash(localPath);
+        }
+        progress.incrementAndGet();
+        if (toThreshold.incrementAndGet() > threshold) {
+            toThreshold.set(0);
+            log.info("Progress {}/{}", progress, totalSize);
         }
     }
 

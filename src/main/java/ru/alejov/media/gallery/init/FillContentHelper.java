@@ -172,7 +172,21 @@ public class FillContentHelper {
     private static void extractMetadata(int size, List<Media> mediaList, boolean parallel) {
         log.info("Start extracting metadata(parallel={})", parallel);
         AtomicInteger progress = new AtomicInteger();
-        AtomicInteger toTs = new AtomicInteger();
+        AtomicInteger toThreshold = new AtomicInteger();
+        final int threshold = getThreshold(size);
+        if (parallel) {
+            mediaList.parallelStream().forEach(media -> {
+                extractMetadataInner(size, media, progress, toThreshold, threshold);
+            });
+        } else {
+            for (Media media : mediaList) {
+                extractMetadataInner(size, media, progress, toThreshold, threshold);
+            }
+        }
+        log.info("Finish extracting metadata");
+    }
+
+    private static int getThreshold(int size) {
         final int threshold;
         if (size < 1000) {
             threshold = size / 25;
@@ -181,19 +195,10 @@ public class FillContentHelper {
         } else {
             threshold = size / 500;
         }
-        if (parallel) {
-            mediaList.parallelStream().forEach(media -> {
-                extractMetadataInner(size, media, progress, toTs, threshold);
-            });
-        } else {
-            for (Media media : mediaList) {
-                extractMetadataInner(size, media, progress, toTs, threshold);
-            }
-        }
-        log.info("Finish extracting metadata");
+        return threshold;
     }
 
-    private static void extractMetadataInner(int size, Media media, AtomicInteger progress, AtomicInteger toTs, int threshold) {
+    private static void extractMetadataInner(int size, Media media, AtomicInteger progress, AtomicInteger toThreshold, int threshold) {
         Map<MetaTag, String> metadata = MetadataUtils.getMetadata(media.getLocalPath(), media.getType());
         if (!metadata.isEmpty()) {
             media.setMetadata(metadata);
@@ -203,8 +208,8 @@ public class FillContentHelper {
             }
         }
         progress.incrementAndGet();
-        if (toTs.incrementAndGet() > threshold) {
-            toTs.set(0);
+        if (toThreshold.incrementAndGet() > threshold) {
+            toThreshold.set(0);
             log.info("Progress {}/{}", progress, size);
         }
     }
@@ -218,11 +223,19 @@ public class FillContentHelper {
     }
 
     private static void calculateMd5(boolean parallel, List<Media> mediaList) {
-        log.info("Calculate MD5 for {} files", mediaList.size());
+        int size = mediaList.size();
+        log.info("Calculate MD5 for {} files", size);
         Instant begin = Instant.now();
+        AtomicInteger progress = new AtomicInteger();
+        AtomicInteger toThreshold = new AtomicInteger();
+        final int threshold = getThreshold(size);
         if (parallel) {
             mediaList.parallelStream()
-                     .forEach(Media::calculateMd5);
+                     .forEach(media -> media.calculateMd5(threshold, toThreshold, progress, size));
+        } else {
+            for (Media media : mediaList) {
+                media.calculateMd5(threshold, toThreshold, progress, size);
+            }
         }
         Duration duration = Duration.between(begin, Instant.now());
         log.info("MD5 calculated at {}", duration.toString().replace("PT", ""));
