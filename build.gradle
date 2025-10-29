@@ -1,5 +1,6 @@
 plugins {
     id 'java'
+    id 'com.gradleup.shadow' version '8.3.0'
 }
 
 group = 'ru.alejov'
@@ -16,12 +17,25 @@ repositories {
     }
 }
 
+jar {
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    manifest {
+        // Optionally, set the main class for the JAR.
+        attributes "Main-Class": "ru.alejov.media.gallery.init.FillContentHelper"
+    }
+}
+
+assemble.dependsOn(shadowJar)
+
 dependencies {
     compileOnly("com.google.code.findbugs:jsr305:3.0.2")
 
     implementation "org.postgresql:postgresql:$postgresVersion"
     implementation "org.apache.commons:commons-imaging:$commonsImagingVersion"
     implementation "com.fasterxml.jackson.core:jackson-databind:$jacksonVersion"
+    implementation "org.slf4j:slf4j-simple:$slf4jVersion"
 
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'

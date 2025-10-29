@@ -1,22 +1,30 @@
 package ru.alejov.media.gallery;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+
+import javax.annotation.Nonnull;
 import java.nio.file.Path;
 import java.sql.Timestamp;
 import java.util.Map;
 import java.util.Objects;
 
-public final class Media {
+public final class Media implements Comparable<Media> {
     private final String name;
-    private final Timestamp createdAt;
+    private Timestamp createdAt;
+    private final Timestamp lastModify;
     private final Map<String, String> paths;
-    private String md5Hash;
     private final long size;
     private final String type;
-    private final Map<MetaTag, String> metadata;
+    private Map<MetaTag, String> metadata;
+    private String md5Hash;
+    @JsonIgnore
     private transient final Path localPath;
+    @JsonIgnore
+    private transient final String nameToSort;
 
     public Media(String name,
                  Timestamp createdAt,
+                 Timestamp lastModify,
                  Map<String, String> paths,
                  String md5Hash,
                  long size,
@@ -25,42 +33,45 @@ public final class Media {
                  Path localPath) {
         this.name = name;
         this.createdAt = createdAt;
+        this.lastModify = lastModify;
         this.paths = paths;
         this.md5Hash = md5Hash;
         this.size = size;
         this.type = type;
         this.metadata = metadata;
         this.localPath = localPath;
+        this.nameToSort = name.replace("_", "").replace("-", "");
     }
 
-    public String name() {
+    public String getName() {
         return name;
     }
 
-    public Timestamp createdAt() {
+    public Timestamp getCreatedAt() {
         return createdAt;
     }
 
-    public Map<String, String> paths() {
+    public Map<String, String> getPaths() {
         return paths;
     }
 
-    public String md5Hash() {
+    public String getMd5Hash() {
         return md5Hash;
     }
 
-    public long size() {
+    public long getSize() {
         return size;
     }
 
-    public String type() {
+    public String getType() {
         return type;
     }
 
-    public Map<MetaTag, String> metadata() {
+    public Map<MetaTag, String> getMetadata() {
         return metadata;
     }
 
+    @JsonIgnore
     public Path getLocalPath() {
         return localPath;
     }
@@ -90,6 +101,7 @@ public final class Media {
         return "Media[" +
                "name=" + name + ", " +
                "createdAt=" + createdAt + ", " +
+               "lastModify=" + lastModify + ", " +
                "paths=" + paths + ", " +
                "md5Hash=" + md5Hash + ", " +
                "size=" + size + ", " +
@@ -97,10 +109,27 @@ public final class Media {
                "metadata=" + metadata + ']';
     }
 
+    @Nonnull
+    public Timestamp getLastModify() {
+        return lastModify;
+    }
 
     public void calculateMd5() {
         if (md5Hash == null) {
             md5Hash = HashUtils.getMd5Hash(localPath);
         }
+    }
+
+    @Override
+    public int compareTo(Media o) {
+        return nameToSort.compareTo(o.nameToSort);
+    }
+
+    public void setMetadata(Map<MetaTag, String> metadata) {
+        this.metadata = metadata;
+    }
+
+    public void setCreateDate(Timestamp createDate) {
+        this.createdAt = createDate;
     }
 }

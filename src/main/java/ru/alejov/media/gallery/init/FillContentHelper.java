@@ -1,17 +1,21 @@
 package ru.alejov.media.gallery.init;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import ru.alejov.media.gallery.DateUtils;
-import ru.alejov.media.gallery.HashUtils;
+import ru.alejov.media.gallery.JsonWriteHelper;
 import ru.alejov.media.gallery.Media;
 import ru.alejov.media.gallery.MetaTag;
 import ru.alejov.media.gallery.MetadataUtils;
 import ru.alejov.media.gallery.PgHelper;
 
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintStream;
 import java.io.UnsupportedEncodingException;
 import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -23,120 +27,237 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class FillContentHelper {
 
+    public static final Logger log;
 
     private static final String PRIMARY_FILL = "--primary-fill";
-    private static final String ROOT_DIR = "rootDir";
-    private static final String PG_SETTINGS_PATH = "pgSettingsPath";
-    private static final String PARALLEL = "parallel";
-    private static final String CALCULATE_MD5 = "calculateMD5";
+    private static final String INCREMENTAL_FILL = "--incremental-fill";
+    private static final String HELP = "--help";
 
-    private static final PrintStream outStream;
-    private static final PrintStream errorStream;
+    private static final String ROOT_DIR = "root-dir";
+    private static final String PG_SETTINGS_PATH = "pg-settings-path";
+    private static final String PARALLEL = "parallel";
+    private static final String CALCULATE_MD5 = "calculate-hash";
+
+    private static final Predicate<Path> IS_FILE = (Path path) -> !Files.isDirectory(path);
 
     static {
         try {
-            outStream = new PrintStream(System.out, true, StandardCharsets.UTF_8.name());
-            errorStream = new PrintStream(System.err, true, StandardCharsets.UTF_8.name());
+            System.setOut(new PrintStream(System.out, true, StandardCharsets.UTF_8.name()));
         } catch (UnsupportedEncodingException e) {
             throw new RuntimeException(e);
         }
+        System.setProperty("org.slf4j.simpleLogger.showThreadName", "false");
+        System.setProperty("org.slf4j.simpleLogger.showDateTime", "true");
+        System.setProperty("org.slf4j.simpleLogger.dateTimeFormat", "yyyy-MM-dd HH:mm:ss.SSS");
+        System.setProperty("org.slf4j.simpleLogger.logFile", "System.out");
+        log = LoggerFactory.getLogger(FillContentHelper.class);
     }
 
-    //--primary-fill rootDir="rootDirectory" [pgSettingsPath="path to jdbc.properties"] [parallel=true] [calculateMD5=true]
-    public static void main(String[] args) throws IOException, SQLException {
-        Map<String, String> params = new HashMap<>();
-        for (String arg : args) {
-            String[] strings = arg.split("=");
-            params.put(strings[0], strings.length > 1 ? strings[1] : "");
+    //--primary-fill root-dir="rootDirectory" [pg-settings-path="path to jdbc.properties"] [parallel=true] [calculate-hash=true]
+    public static void main(String[] args) {
+        try {
+            Map<String, String> params = new HashMap<>();
+            for (String arg : args) {
+                String[] strings = arg.split("=");
+                params.put(strings[0], strings.length > 1 ? strings[1] : "");
+            }
+            if (params.containsKey(PRIMARY_FILL)) {
+                String rootDir = params.get(ROOT_DIR);
+                if (rootDir != null) {
+                    String pgSettingsPath = params.get(PG_SETTINGS_PATH);
+                    boolean parallel = Boolean.parseBoolean(params.getOrDefault(PARALLEL, "false"));
+                    boolean calculateMd5 = Boolean.parseBoolean(params.getOrDefault(CALCULATE_MD5, "false"));
+                    primaryFill(rootDir, pgSettingsPath, parallel, calculateMd5);
+                } else {
+                    System.out.println("Missing parameter: " + ROOT_DIR);
+                }
+            } else if (params.containsKey(INCREMENTAL_FILL)) {
+                String rootDir = params.get(ROOT_DIR);
+                if (rootDir != null) {
+                    String pgSettingsPath = params.get(PG_SETTINGS_PATH);
+                    boolean parallel = Boolean.parseBoolean(params.getOrDefault(PARALLEL, "false"));
+                    boolean calculateMd5 = Boolean.parseBoolean(params.getOrDefault(CALCULATE_MD5, "false"));
+                    incrementalFill(rootDir, pgSettingsPath, parallel, calculateMd5);
+                } else {
+                    System.out.println("Missing parameter: " + ROOT_DIR);
+                }
+            } else if (params.containsKey(HELP)) {
+                System.out.println("Example: [--primary-fill | --incremental-fill] root-dir=\"rootDirectory\" [pg-settings-path=\"path to jdbc.properties\"] [parallel=true] [calculate-hash=true]");
+            } else {
+                System.out.println("Unknown command. Only " + Arrays.asList(PRIMARY_FILL, INCREMENTAL_FILL, HELP) + " is supported now");
+            }
+        } catch (Exception e) {
+            log.error(e.toString(), e);
         }
-        if (params.containsKey(PRIMARY_FILL)) {
-            String rootDir = params.get(ROOT_DIR);
-            String pgSettingsPath = params.get(PG_SETTINGS_PATH);
-            boolean parallel = Boolean.parseBoolean(params.getOrDefault(PARALLEL, "false"));
-            boolean calculateMd5 = Boolean.parseBoolean(params.getOrDefault(CALCULATE_MD5, "false"));
-            primaryFill(rootDir, pgSettingsPath, parallel, calculateMd5);
-        } else {
-            outStream.printf("Only '%s' is supported now", PRIMARY_FILL);
+    }
+
+    private static void incrementalFill(String rootDirectory, String jdbcPropertiesFile, boolean parallel, boolean calculateMd5) throws IOException, SQLException {
+        log.info("Start incrementalFill(parallel={})", parallel);
+        Properties supportedExtensions = getSupportedExtensions();
+        Set<String> unsupportedExtensions = new LinkedHashSet<>();
+        String hostName = getHostName();
+        List<Media> mediaList = collectMedia(rootDirectory, parallel, supportedExtensions, unsupportedExtensions, hostName);
+        if (!unsupportedExtensions.isEmpty()) {
+            log.warn("Unsupported extensions: {}", unsupportedExtensions);
+        }
+        if (calculateMd5) {
+            calculateMd5(parallel, mediaList);
+        }
+        log.info("Finish incrementalFill(parallel={})", parallel);
+        if (jdbcPropertiesFile != null) {
+            new PgHelper(log).mergeToDatabase(jdbcPropertiesFile, mediaList, hostName);
         }
     }
 
     private static void primaryFill(String rootDirectory, String jdbcPropertiesFile, boolean parallel, boolean calculateMd5) throws IOException, SQLException {
-        outStream.println("Start primaryFill(parallel=" + parallel + ")");
+        log.info("Start primaryFill(parallel={})", parallel);
+        Properties supportedExtensions = getSupportedExtensions();
+        Set<String> unsupportedExtensions = new LinkedHashSet<>();
+        String hostName = getHostName();
+        List<Media> mediaList = collectMedia(rootDirectory, parallel, supportedExtensions, unsupportedExtensions, hostName);
+        if (!unsupportedExtensions.isEmpty()) {
+            log.warn("Unsupported extensions: {}", unsupportedExtensions);
+        }
+        if (calculateMd5) {
+            calculateMd5(parallel, mediaList);
+        }
+        if (jdbcPropertiesFile != null) {
+            new PgHelper(log).fillEmptyDatabase(jdbcPropertiesFile, mediaList);
+        } else {
+            new JsonWriteHelper(log).toJsonFile(mediaList);
+        }
+        log.info("Finish primaryFill");
+    }
+
+    private static String getHostName() throws UnknownHostException {
+        return InetAddress.getLocalHost().getHostName();
+    }
+
+    private static List<Media> collectMedia(String rootDirectory,
+                                            boolean parallel,
+                                            Properties supportedExtensions,
+                                            Set<String> unsupportedExtensions,
+                                            String systemName) throws IOException {
+        List<Media> mediaList;
+        try (Stream<Path> stream = Files.walk(Paths.get(rootDirectory))) {
+            if (parallel) {
+                mediaList = stream.parallel()
+                                  .filter(IS_FILE)
+                                  .map((Path path) -> processMedia(path, supportedExtensions, unsupportedExtensions, systemName))
+                                  .filter(Objects::nonNull)
+                                  .sorted()
+                                  .collect(Collectors.toList());
+            } else {
+                mediaList = stream.filter(IS_FILE)
+                                  .map((Path path) -> processMedia(path, supportedExtensions, unsupportedExtensions, systemName))
+                                  .filter(Objects::nonNull)
+                                  .sorted()
+                                  .collect(Collectors.toList());
+            }
+
+        }
+        int size = mediaList.size();
+        log.info("Find {} files", size);
+        extractMetadata(size, mediaList, parallel);
+        return mediaList;
+    }
+
+    private static void extractMetadata(int size, List<Media> mediaList, boolean parallel) {
+        log.info("Start extracting metadata(parallel={})", parallel);
+        AtomicInteger progress = new AtomicInteger();
+        AtomicInteger toTs = new AtomicInteger();
+        final int threshold;
+        if (size < 1000) {
+            threshold = size / 25;
+        } else if (size < 10000) {
+            threshold = size / 125;
+        } else {
+            threshold = size / 500;
+        }
+        if (parallel) {
+            mediaList.parallelStream().forEach(media -> {
+                extractMetadataInner(size, media, progress, toTs, threshold);
+            });
+        } else {
+            for (Media media : mediaList) {
+                extractMetadataInner(size, media, progress, toTs, threshold);
+            }
+        }
+        log.info("Finish extracting metadata");
+    }
+
+    private static void extractMetadataInner(int size, Media media, AtomicInteger progress, AtomicInteger toTs, int threshold) {
+        Map<MetaTag, String> metadata = MetadataUtils.getMetadata(media.getLocalPath(), media.getType());
+        if (!metadata.isEmpty()) {
+            media.setMetadata(metadata);
+            Timestamp createDate = DateUtils.getCreateDate(metadata, media.getName());
+            if (createDate != null) {
+                media.setCreateDate(createDate);
+            }
+        }
+        progress.incrementAndGet();
+        if (toTs.incrementAndGet() > threshold) {
+            toTs.set(0);
+            log.info("Progress {}/{}", progress, size);
+        }
+    }
+
+    private static Properties getSupportedExtensions() throws IOException {
         Properties supportedExtensions = new Properties();
         try (InputStream resourceAsStream = FillContentHelper.class.getClassLoader().getResourceAsStream("supported_extensions.properties")) {
             supportedExtensions.load(resourceAsStream);
         }
-        Set<String> unsupportedExtensions = new LinkedHashSet<>();
-        List<Media> mediaList = new ArrayList<>();
-        String systemName = InetAddress.getLocalHost().getHostName();
-        try (Stream<Path> stream = Files.walk(Paths.get(rootDirectory))) {
-            if (parallel) {
-                stream.parallel().filter(path -> !Files.isDirectory(path))
-                      .forEach(path -> {
-                          processMedia(path, supportedExtensions, unsupportedExtensions, systemName, mediaList);
-                      });
-            } else {
-                stream.filter(path -> !Files.isDirectory(path))
-                      .forEach(path -> {
-                          processMedia(path, supportedExtensions, unsupportedExtensions, systemName, mediaList);
-                      });
-            }
-
-        }
-        if (!unsupportedExtensions.isEmpty()) {
-            outStream.println("Unsupported extensions: " + unsupportedExtensions);
-        }
-        outStream.printf("Find %d files\n", mediaList.size());
-        if (calculateMd5) {
-            outStream.printf("Calculate MD5 for %d files\n", mediaList.size());
-            Instant begin = Instant.now();
-            if (parallel) {
-                mediaList.parallelStream()
-                         .forEach(Media::calculateMd5);
-            }
-            Duration duration = Duration.between(begin, Instant.now());
-            outStream.println("MD5 calculated at " + duration.toString().replace("PT", ""));
-        }
-        //mediaList.forEach(outStream::println);
-        if (jdbcPropertiesFile != null) {
-            PgHelper.saveToDatabase(jdbcPropertiesFile, mediaList);
-        }
-        outStream.println("Finish primaryFill");
+        return supportedExtensions;
     }
 
-    private static void processMedia(Path path, Properties supportedExtensions, Set<String> unsupportedExtensions, String systemName, List<Media> mediaList) {
+    private static void calculateMd5(boolean parallel, List<Media> mediaList) {
+        log.info("Calculate MD5 for {} files", mediaList.size());
+        Instant begin = Instant.now();
+        if (parallel) {
+            mediaList.parallelStream()
+                     .forEach(Media::calculateMd5);
+        }
+        Duration duration = Duration.between(begin, Instant.now());
+        log.info("MD5 calculated at {}", duration.toString().replace("PT", ""));
+    }
+
+    @Nullable
+    private static Media processMedia(Path path, Properties supportedExtensions, Set<String> unsupportedExtensions, String systemName) {
         String fileName = path.getFileName().toString();
         String extension = getExtension(fileName);
         String type = supportedExtensions.getProperty(extension);
         if (type == null) {
             unsupportedExtensions.add(extension);
+            return null;
         } else {
-            Media media = getMedia(path, fileName, type, systemName);
-            mediaList.add(media);
+            return getMedia(path, fileName, type, systemName);
         }
     }
 
+    @Nullable
     private static Media getMedia(Path path, String fileName, String type, String systemName) {
-        Media media;
         try {
-            Map<MetaTag, String> metadata = MetadataUtils.getMetadata(path, type);
-
-            Timestamp createDate = DateUtils.getCreateDate(metadata, fileName);
+            Timestamp createDate = DateUtils.getCreateDate(Collections.emptyMap(), fileName);
+            BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class);
             if (createDate == null) {
-                BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class);
                 FileTime creationTime = attributes.creationTime();
                 createDate = Timestamp.from(creationTime.toInstant());
             }
-            String md5Hash = null;
-            media = new Media(fileName, createDate, Collections.singletonMap(systemName, path.toString()), md5Hash, path.toFile().length(), type, metadata, path);
+            Timestamp lastModify = Timestamp.from(attributes.lastModifiedTime().toInstant());
+            Path absolutePath = path.toAbsolutePath();
+            Map<String, String> paths = Collections.singletonMap(systemName, absolutePath.toString());
+            return new Media(fileName, createDate, lastModify, paths, null, path.toFile().length(), type, Collections.emptyMap(), absolutePath);
         } catch (IOException e) {
-            throw new RuntimeException(e);
+            log.error("Error on file: {}: {}", path, e.toString());
+            return null;
         }
-        return media;
     }
 
 
