@@ -34,6 +34,9 @@ public class JsonIOHelper {
             String md5Hash = (String) map.get("md5Hash");
             String type = (String) map.get("type");
             Map<String, String> metadata = (Map<String, String>) map.get("metadata");
+            if (metadata != null) {
+                MetadataUtils.clearMetadataValues(metadata);
+            }
             Media media = new Media(name, createdAt, lastModify, paths, md5Hash, size.longValue(), type, metadata, null);
             mediaList.add(media);
         }

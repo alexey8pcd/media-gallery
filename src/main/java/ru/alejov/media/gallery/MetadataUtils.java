@@ -2,6 +2,7 @@ package ru.alejov.media.gallery;
 
 import org.apache.commons.imaging.Imaging;
 import org.apache.commons.imaging.common.ImageMetadata;
+import org.apache.commons.lang3.StringUtils;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -58,6 +59,33 @@ public class MetadataUtils {
         return metadata;
     }
 
+    public static void clearMetadataValues(@Nonnull Map<String, String> input) {
+        input.replaceAll((String key, String value) -> clearMetadata(value));
+    }
+
+    private static String clearMetadata(String value) {
+        return StringUtils.strip(removeStartEnd(value, "'"));
+    }
+
+    private static String removeStartEnd(String value, String symbol) {
+        if (value == null) {
+            return null;
+        }
+        if (value.startsWith(symbol)) {
+            if (value.endsWith(symbol)) {
+                return value.substring(1, value.length() - 1);
+            } else {
+                return value.substring(1);
+            }
+        } else {
+            if (value.endsWith(symbol)) {
+                return value.substring(0, value.length() - 2);
+            } else {
+                return value;
+            }
+        }
+    }
+
     public static class Tag {
 
         private final MetaTag key;
@@ -91,7 +119,8 @@ public class MetadataUtils {
             if (value != null && (metaTag == MetaTag.Make || metaTag == MetaTag.Model || metaTag == MetaTag.Software)) {
                 value = value.replace(",", "").trim();
             }
-            return new Tag(metaTag, value);
+            String cleared = clearMetadata(value);
+            return new Tag(metaTag, cleared);
         }
 
         @Override
@@ -101,4 +130,5 @@ public class MetadataUtils {
 
 
     }
+
 }

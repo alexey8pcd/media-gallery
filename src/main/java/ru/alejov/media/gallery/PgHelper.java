@@ -152,7 +152,7 @@ public class PgHelper {
                                             inserted = true;
                                             log.info("File '{}' inserted with new name: {}", getLocalPath(media), newName);
                                         } else {
-                                            log.info("File '{}' already exist, skipped", getLocalPath(media);
+                                            log.info("File '{}' already exist, skipped", getLocalPath(media));
                                         }
                                     }
                                 }
