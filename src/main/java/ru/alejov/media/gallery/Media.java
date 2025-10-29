@@ -10,12 +10,12 @@ import java.util.Objects;
 
 public final class Media implements Comparable<Media> {
     private final String name;
-    private final Timestamp createdAt;
+    private Timestamp createdAt;
     private final Timestamp lastModify;
     private final Map<String, String> paths;
     private final long size;
     private final String type;
-    private final Map<MetaTag, String> metadata;
+    private Map<MetaTag, String> metadata;
     private String md5Hash;
     @JsonIgnore
     private transient final Path localPath;
@@ -123,5 +123,13 @@ public final class Media implements Comparable<Media> {
     @Override
     public int compareTo(Media o) {
         return nameToSort.compareTo(o.nameToSort);
+    }
+
+    public void setMetadata(Map<MetaTag, String> metadata) {
+        this.metadata = metadata;
+    }
+
+    public void setCreateDate(Timestamp createDate) {
+        this.createdAt = createDate;
     }
 }

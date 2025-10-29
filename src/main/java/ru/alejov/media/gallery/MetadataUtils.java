@@ -14,6 +14,8 @@ import java.util.Objects;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
 
+import static ru.alejov.media.gallery.init.FillContentHelper.log;
+
 public class MetadataUtils {
 
 
@@ -50,7 +52,7 @@ public class MetadataUtils {
                     }
                 }
             } catch (Exception e) {
-                System.err.println("Image " + path + " metadata error: " + e);
+                log.warn("Image {} metadata error: {}", path, e.toString());
             }
         }
         return metadata;

@@ -9,7 +9,6 @@ import ru.alejov.media.gallery.MetaTag;
 import ru.alejov.media.gallery.MetadataUtils;
 import ru.alejov.media.gallery.PgHelper;
 
-import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.io.InputStream;
@@ -28,13 +27,14 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class FillContentHelper {
 
-    private static final Logger log;
+    public static final Logger log;
 
     private static final String PRIMARY_FILL = "--primary-fill";
     private static final String INCREMENTAL_FILL = "--incremental-fill";
@@ -53,8 +53,8 @@ public class FillContentHelper {
         } catch (UnsupportedEncodingException e) {
             throw new RuntimeException(e);
         }
-        System.setProperty("org.slf4j.simpleLogger.showThreadName", "true");
-        System.setProperty("org.slf4j.simpleLogger.showThreadId", "false");
+        System.setProperty("org.slf4j.simpleLogger.showThreadName", "false");
+        System.setProperty("org.slf4j.simpleLogger.showDateTime", "true");
         System.setProperty("org.slf4j.simpleLogger.dateTimeFormat", "yyyy-MM-dd HH:mm:ss.SSS");
         System.setProperty("org.slf4j.simpleLogger.logFile", "System.out");
         log = LoggerFactory.getLogger(FillContentHelper.class);
@@ -163,8 +163,50 @@ public class FillContentHelper {
             }
 
         }
-        log.info("Find {} files", mediaList.size());
+        int size = mediaList.size();
+        log.info("Find {} files", size);
+        extractMetadata(size, mediaList, parallel);
         return mediaList;
+    }
+
+    private static void extractMetadata(int size, List<Media> mediaList, boolean parallel) {
+        log.info("Start extracting metadata(parallel={})", parallel);
+        AtomicInteger progress = new AtomicInteger();
+        AtomicInteger toTs = new AtomicInteger();
+        final int threshold;
+        if (size < 1000) {
+            threshold = size / 25;
+        } else if (size < 10000) {
+            threshold = size / 125;
+        } else {
+            threshold = size / 500;
+        }
+        if (parallel) {
+            mediaList.parallelStream().forEach(media -> {
+                extractMetadataInner(size, media, progress, toTs, threshold);
+            });
+        } else {
+            for (Media media : mediaList) {
+                extractMetadataInner(size, media, progress, toTs, threshold);
+            }
+        }
+        log.info("Finish extracting metadata");
+    }
+
+    private static void extractMetadataInner(int size, Media media, AtomicInteger progress, AtomicInteger toTs, int threshold) {
+        Map<MetaTag, String> metadata = MetadataUtils.getMetadata(media.getLocalPath(), media.getType());
+        if (!metadata.isEmpty()) {
+            media.setMetadata(metadata);
+            Timestamp createDate = DateUtils.getCreateDate(metadata, media.getName());
+            if (createDate != null) {
+                media.setCreateDate(createDate);
+            }
+        }
+        progress.incrementAndGet();
+        if (toTs.incrementAndGet() > threshold) {
+            toTs.set(0);
+            log.info("Progress {}/{}", progress, size);
+        }
     }
 
     private static Properties getSupportedExtensions() throws IOException {
@@ -199,12 +241,10 @@ public class FillContentHelper {
         }
     }
 
-    @Nonnull
+    @Nullable
     private static Media getMedia(Path path, String fileName, String type, String systemName) {
         try {
-            Map<MetaTag, String> metadata = MetadataUtils.getMetadata(path, type);
-
-            Timestamp createDate = DateUtils.getCreateDate(metadata, fileName);
+            Timestamp createDate = DateUtils.getCreateDate(Collections.emptyMap(), fileName);
             BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class);
             if (createDate == null) {
                 FileTime creationTime = attributes.creationTime();
@@ -213,9 +253,10 @@ public class FillContentHelper {
             Timestamp lastModify = Timestamp.from(attributes.lastModifiedTime().toInstant());
             Path absolutePath = path.toAbsolutePath();
             Map<String, String> paths = Collections.singletonMap(systemName, absolutePath.toString());
-            return new Media(fileName, createDate, lastModify, paths, null, path.toFile().length(), type, metadata, absolutePath);
+            return new Media(fileName, createDate, lastModify, paths, null, path.toFile().length(), type, Collections.emptyMap(), absolutePath);
         } catch (IOException e) {
-            throw new RuntimeException(e);
+            log.error("Error on file: {}: {}", path, e.toString());
+            return null;
         }
     }
 
