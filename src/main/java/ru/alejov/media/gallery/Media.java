@@ -18,7 +18,7 @@ public final class Media implements Comparable<Media> {
     private final Map<String, String> paths;
     private final long size;
     private final String type;
-    private Map<MetaTag, String> metadata;
+    private Map<String, String> metadata;
     private String md5Hash;
     @JsonIgnore
     private transient final Path localPath;
@@ -32,7 +32,7 @@ public final class Media implements Comparable<Media> {
                  String md5Hash,
                  long size,
                  String type,
-                 Map<MetaTag, String> metadata,
+                 Map<String, String> metadata,
                  Path localPath) {
         this.name = name;
         this.createdAt = createdAt;
@@ -70,7 +70,7 @@ public final class Media implements Comparable<Media> {
         return type;
     }
 
-    public Map<MetaTag, String> getMetadata() {
+    public Map<String, String> getMetadata() {
         return metadata;
     }
 
@@ -133,7 +133,7 @@ public final class Media implements Comparable<Media> {
         return nameToSort.compareTo(o.nameToSort);
     }
 
-    public void setMetadata(Map<MetaTag, String> metadata) {
+    public void setMetadata(Map<String, String> metadata) {
         this.metadata = metadata;
     }
 

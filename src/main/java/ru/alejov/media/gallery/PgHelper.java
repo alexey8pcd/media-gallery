@@ -3,6 +3,7 @@ package ru.alejov.media.gallery;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.postgresql.ds.PGSimpleDataSource;
+import org.postgresql.util.PSQLException;
 import org.slf4j.Logger;
 
 import javax.annotation.Nullable;
@@ -31,6 +32,8 @@ public class PgHelper {
     private static final String INSERT_SQL = ""
                                              + "INSERT INTO media(name, create_date, metadata, paths, type, file_size, hash_md5, last_modify)\n"
                                              + "VALUES (?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?)\n"
+                                             + "ON CONFLICT (name)\n"
+                                             + "DO NOTHING\n"
                                              + "RETURNING id";
     private static final String TEST_SELECT = ""
                                               + "SELECT name\n"
@@ -81,7 +84,7 @@ public class PgHelper {
                 if (filled) {
                     int count = 0;
                     for (Media media : mediaList) {
-                        fillInsertStatement(media, insertStatement);
+                        fillInsertStatement(media, insertStatement, media.getName());
                         insertStatement.addBatch();
                         ++count;
                         if (count > 100) {
@@ -135,10 +138,28 @@ public class PgHelper {
                             dbMedia = nextFromDb(resultSet);
                         } else {
                             //Файл в базе больше, чем в памяти. Файл надо добавить.
-                            fillInsertStatement(media, insertStmt);
-                            insertStmt.execute();
-                            log.info("File '{}' inserted", media.getLocalPath().toString());
-                            insertedCount.incrementAndGet();
+                            fillInsertStatement(media, insertStmt, media.getName());
+                            boolean inserted = false;
+                            try (ResultSet resultSetLocal = insertStmt.executeQuery()) {
+                                if (resultSetLocal.next()) {
+                                    inserted = true;
+                                    log.info("File '{}' inserted", getLocalPath(media));
+                                } else {
+                                    String newName = "autorenamed_" + media.getName();
+                                    fillInsertStatement(media, insertStmt, newName);
+                                    try (ResultSet resultSet2 = insertStmt.executeQuery()) {
+                                        if (resultSet2.next()) {
+                                            inserted = true;
+                                            log.info("File '{}' inserted with new name: {}", getLocalPath(media), newName);
+                                        } else {
+                                            log.info("File '{}' already exist, skipped", getLocalPath(media);
+                                        }
+                                    }
+                                }
+                            }
+                            if (inserted) {
+                                insertedCount.incrementAndGet();
+                            }
                             //Выбираем следующий из памяти
                             media = nextMedia(mediaIterator);
                         }
@@ -149,10 +170,10 @@ public class PgHelper {
                     }
                     if (dbMedia == null && media != null) {
                         //нет больше записей в БД
-                        fillInsertStatement(media, insertStmt);
+                        fillInsertStatement(media, insertStmt, media.getName());
                         insertStmt.execute();
                         insertedCount.incrementAndGet();
-                        log.info("File '{}' inserted", media.getLocalPath().toString());
+                        log.info("File '{}' inserted", getLocalPath(media));
 
                         int count = insertRestMedia(mediaIterator, insertStmt);
                         if (count > 0) {
@@ -169,6 +190,16 @@ public class PgHelper {
             }
         }
         log.info("Finish mergeToDatabase. Inserted rows: {}, updated rows: {}", insertedCount, updatedCount);
+    }
+
+    private static String getLocalPath(Media media) {
+        Path localPath = media.getLocalPath();
+        String name = media.getName();
+        String localPathStr = "UNKNOWN";
+        if (localPath != null) {
+            localPathStr = localPath.toString();
+        }
+        return name + " (" + localPathStr + ")";
     }
 
     private void logFileNotExists(String hostName, DbMedia dbMedia) {
@@ -204,15 +235,18 @@ public class PgHelper {
                     log.info("File '{}' merged with other path: {}", dbMedia.name, toLogPath(paths));
                     updatedCount.incrementAndGet();
                 } else {
-                    //если это то же устройство, обновим путь при перемещении
-                    Path absolutePath = media.getLocalPath().toAbsolutePath();
-                    if (!absolutePath.toString().equals(path)) {
-                        dbMedia.paths.putAll(paths);
-                        updatePathsStmt.setString(1, OBJECT_MAPPER.writeValueAsString(dbMedia.paths));
-                        updatePathsStmt.setLong(2, dbMedia.id);
-                        updatePathsStmt.executeUpdate();
-                        log.info("File '{}' relocated to new path: {}", dbMedia.name, absolutePath);
-                        updatedCount.incrementAndGet();
+                    Path localPath = media.getLocalPath();
+                    if (localPath != null) {
+                        //если это то же устройство, обновим путь при перемещении
+                        Path absolutePath = localPath.toAbsolutePath();
+                        if (!absolutePath.toString().equals(path)) {
+                            dbMedia.paths.putAll(paths);
+                            updatePathsStmt.setString(1, OBJECT_MAPPER.writeValueAsString(dbMedia.paths));
+                            updatePathsStmt.setLong(2, dbMedia.id);
+                            updatePathsStmt.executeUpdate();
+                            log.info("File '{}' relocated to new path: {}", dbMedia.name, absolutePath);
+                            updatedCount.incrementAndGet();
+                        }
                     }
                 }
             } else if (dbMedia.md5Hash == null) {
@@ -234,7 +268,7 @@ public class PgHelper {
             updateNameStmt.executeUpdate();
             updatedCount.incrementAndGet();
             log.info("File with ID: {}, name: '{}' in database in obsolete. Renamed to '{}'", dbMedia.id, dbMedia.name, newName);
-            fillInsertStatement(media, insertStmt);
+            fillInsertStatement(media, insertStmt, media.getName());
             insertStmt.execute();
             log.info("File '{}' inserted", media.getName());
             insertedCount.incrementAndGet();
@@ -266,7 +300,7 @@ public class PgHelper {
         int batch = 0;
         while (mediaIterator.hasNext()) {
             Media media = mediaIterator.next();
-            fillInsertStatement(media, insertStmt);
+            fillInsertStatement(media, insertStmt, media.getName());
             log.info("File '{}' inserted", media.getName());
             insertStmt.addBatch();
             ++total;
@@ -321,8 +355,10 @@ public class PgHelper {
         }
     }
 
-    private static void fillInsertStatement(Media media, PreparedStatement preparedStatement) throws SQLException, JsonProcessingException {
-        preparedStatement.setString(1, media.getName());
+    private static void fillInsertStatement(Media media,
+                                            PreparedStatement preparedStatement,
+                                            String mediaName) throws SQLException, JsonProcessingException {
+        preparedStatement.setString(1, mediaName);
         preparedStatement.setTimestamp(2, media.getCreatedAt());
         preparedStatement.setString(3, OBJECT_MAPPER.writeValueAsString(media.getMetadata()));
         preparedStatement.setString(4, OBJECT_MAPPER.writeValueAsString(media.getPaths()));

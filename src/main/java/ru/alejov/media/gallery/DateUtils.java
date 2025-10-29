@@ -5,6 +5,7 @@ import org.apache.commons.lang3.StringUtils;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.sql.Timestamp;
+import java.time.DateTimeException;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -22,17 +23,20 @@ public class DateUtils {
     static final DateTimeFormatter DATE_SHORT_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd");
 
     @Nullable
-    public static Timestamp getCreateDate(Map<MetaTag, String> tags, String fileName) {
+    public static Timestamp getCreateDate(Map<String, String> tags, String fileName) {
         Matcher dateFullMatcher = DateUtils.DATE_FULL_PATTERN.matcher(fileName);
         if (dateFullMatcher.find()) {
             String dateFull = dateFullMatcher.group(1);
             try {
                 LocalDateTime localDateTime = LocalDateTime.parse(dateFull, DateUtils.DATE_FULL_FORMAT);
+                if (localDateTime.isAfter(LocalDateTime.now().plusDays(1))) {
+                    throw new DateTimeException("Incorrect date: " + dateFull);
+                }
                 return Timestamp.valueOf(localDateTime);
-            } catch (DateTimeParseException ignored) {
+            } catch (DateTimeException ignored) {
             }
         } else {
-            String dateTimeOriginal = tags.get(MetaTag.DateTimeOriginal);
+            String dateTimeOriginal = tags.get(MetaTag.DateTimeOriginal.name());
             Timestamp createDate = null;
             if (dateTimeOriginal != null) {
                 createDate = parseDateTimeMetadata(dateTimeOriginal);
@@ -43,8 +47,11 @@ public class DateUtils {
                     String dateShort = dateShortMatcher.group(1);
                     try {
                         LocalDate localDate = LocalDate.parse(dateShort, DateUtils.DATE_SHORT_FORMAT);
+                        if (localDate.isAfter(LocalDate.now().plusDays(1))) {
+                            throw new DateTimeException("Incorrect date: " + dateShort);
+                        }
                         createDate = Timestamp.valueOf(localDate.atStartOfDay());
-                    } catch (DateTimeParseException ignored) {
+                    } catch (DateTimeException ignored) {
                     }
                 }
             }

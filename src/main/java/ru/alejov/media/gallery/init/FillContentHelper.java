@@ -3,13 +3,15 @@ package ru.alejov.media.gallery.init;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import ru.alejov.media.gallery.DateUtils;
-import ru.alejov.media.gallery.JsonWriteHelper;
+import ru.alejov.media.gallery.JsonIOHelper;
 import ru.alejov.media.gallery.Media;
 import ru.alejov.media.gallery.MetaTag;
 import ru.alejov.media.gallery.MetadataUtils;
 import ru.alejov.media.gallery.PgHelper;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintStream;
@@ -31,6 +33,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 public class FillContentHelper {
 
@@ -41,6 +45,7 @@ public class FillContentHelper {
     private static final String HELP = "--help";
 
     private static final String ROOT_DIR = "root-dir";
+    private static final String SOURCE_FILE = "source-file";
     private static final String PG_SETTINGS_PATH = "pg-settings-path";
     private static final String PARALLEL = "parallel";
     private static final String CALCULATE_MD5 = "calculate-hash";
@@ -79,14 +84,21 @@ public class FillContentHelper {
                     System.out.println("Missing parameter: " + ROOT_DIR);
                 }
             } else if (params.containsKey(INCREMENTAL_FILL)) {
-                String rootDir = params.get(ROOT_DIR);
-                if (rootDir != null) {
-                    String pgSettingsPath = params.get(PG_SETTINGS_PATH);
+                String pgSettingsPath = params.get(PG_SETTINGS_PATH);
+                if (pgSettingsPath != null) {
+                    String rootDir = params.get(ROOT_DIR);
+                    String sourceFile = params.get(SOURCE_FILE);
                     boolean parallel = Boolean.parseBoolean(params.getOrDefault(PARALLEL, "false"));
                     boolean calculateMd5 = Boolean.parseBoolean(params.getOrDefault(CALCULATE_MD5, "false"));
-                    incrementalFill(rootDir, pgSettingsPath, parallel, calculateMd5);
+                    if (rootDir != null) {
+                        incrementalFillFromDir(rootDir, pgSettingsPath, parallel, calculateMd5);
+                    } else if (sourceFile != null) {
+                        incrementalFillFromFile(new File(sourceFile), pgSettingsPath, parallel);
+                    } else {
+                        System.out.println("Missing any parameters: " + Arrays.asList(ROOT_DIR, SOURCE_FILE));
+                    }
                 } else {
-                    System.out.println("Missing parameter: " + ROOT_DIR);
+                    System.out.println("Missing parameter: " + PG_SETTINGS_PATH);
                 }
             } else if (params.containsKey(HELP)) {
                 System.out.println("Example: [--primary-fill | --incremental-fill] root-dir=\"rootDirectory\" [pg-settings-path=\"path to jdbc.properties\"] [parallel=true] [calculate-hash=true]");
@@ -98,22 +110,33 @@ public class FillContentHelper {
         }
     }
 
-    private static void incrementalFill(String rootDirectory, String jdbcPropertiesFile, boolean parallel, boolean calculateMd5) throws IOException, SQLException {
-        log.info("Start incrementalFill(parallel={})", parallel);
+    private static void incrementalFillFromFile(File sourceFile,
+                                                @Nonnull String jdbcPropertiesFile,
+                                                boolean parallel) throws IOException, SQLException {
+        log.info("Start incrementalFillFromFile(parallel={})", parallel);
+        String hostName = getHostName();
+        List<Media> mediaList = collectMediaFromFile(sourceFile);
+        log.info("Finish incrementalFillFromFile(parallel={})", parallel);
+        new PgHelper(log).mergeToDatabase(jdbcPropertiesFile, mediaList, hostName);
+    }
+
+    private static void incrementalFillFromDir(String rootDirectory,
+                                               @Nonnull String jdbcPropertiesFile,
+                                               boolean parallel,
+                                               boolean calculateMd5) throws IOException, SQLException {
+        log.info("Start incrementalFillFromDir(parallel={})", parallel);
         Properties supportedExtensions = getSupportedExtensions();
         Set<String> unsupportedExtensions = new LinkedHashSet<>();
         String hostName = getHostName();
-        List<Media> mediaList = collectMedia(rootDirectory, parallel, supportedExtensions, unsupportedExtensions, hostName);
+        List<Media> mediaList = collectMediaFromDir(rootDirectory, parallel, supportedExtensions, unsupportedExtensions, hostName);
         if (!unsupportedExtensions.isEmpty()) {
             log.warn("Unsupported extensions: {}", unsupportedExtensions);
         }
         if (calculateMd5) {
             calculateMd5(parallel, mediaList);
         }
-        log.info("Finish incrementalFill(parallel={})", parallel);
-        if (jdbcPropertiesFile != null) {
-            new PgHelper(log).mergeToDatabase(jdbcPropertiesFile, mediaList, hostName);
-        }
+        log.info("Finish incrementalFillFromDir(parallel={})", parallel);
+        new PgHelper(log).mergeToDatabase(jdbcPropertiesFile, mediaList, hostName);
     }
 
     private static void primaryFill(String rootDirectory, String jdbcPropertiesFile, boolean parallel, boolean calculateMd5) throws IOException, SQLException {
@@ -121,7 +144,7 @@ public class FillContentHelper {
         Properties supportedExtensions = getSupportedExtensions();
         Set<String> unsupportedExtensions = new LinkedHashSet<>();
         String hostName = getHostName();
-        List<Media> mediaList = collectMedia(rootDirectory, parallel, supportedExtensions, unsupportedExtensions, hostName);
+        List<Media> mediaList = collectMediaFromDir(rootDirectory, parallel, supportedExtensions, unsupportedExtensions, hostName);
         if (!unsupportedExtensions.isEmpty()) {
             log.warn("Unsupported extensions: {}", unsupportedExtensions);
         }
@@ -131,7 +154,7 @@ public class FillContentHelper {
         if (jdbcPropertiesFile != null) {
             new PgHelper(log).fillEmptyDatabase(jdbcPropertiesFile, mediaList);
         } else {
-            new JsonWriteHelper(log).toJsonFile(mediaList);
+            new JsonIOHelper().toJsonFile(mediaList);
         }
         log.info("Finish primaryFill");
     }
@@ -140,11 +163,22 @@ public class FillContentHelper {
         return InetAddress.getLocalHost().getHostName();
     }
 
-    private static List<Media> collectMedia(String rootDirectory,
-                                            boolean parallel,
-                                            Properties supportedExtensions,
-                                            Set<String> unsupportedExtensions,
-                                            String systemName) throws IOException {
+    private static List<Media> collectMediaFromFile(File sourceFile) throws IOException {
+        List<Media> mediaList;
+        try (ZipInputStream zipInputStream = new ZipInputStream(Files.newInputStream(sourceFile.toPath()))) {
+            ZipEntry nextEntry = zipInputStream.getNextEntry();
+            mediaList = JsonIOHelper.parseMedia(zipInputStream);
+        }
+        int size = mediaList.size();
+        log.info("Find {} files", size);
+        return mediaList;
+    }
+
+    private static List<Media> collectMediaFromDir(String rootDirectory,
+                                                   boolean parallel,
+                                                   Properties supportedExtensions,
+                                                   Set<String> unsupportedExtensions,
+                                                   String systemName) throws IOException {
         List<Media> mediaList;
         try (Stream<Path> stream = Files.walk(Paths.get(rootDirectory))) {
             if (parallel) {
@@ -199,7 +233,7 @@ public class FillContentHelper {
     }
 
     private static void extractMetadataInner(int size, Media media, AtomicInteger progress, AtomicInteger toThreshold, int threshold) {
-        Map<MetaTag, String> metadata = MetadataUtils.getMetadata(media.getLocalPath(), media.getType());
+        Map<String, String> metadata = MetadataUtils.getMetadata(media.getLocalPath(), media.getType());
         if (!metadata.isEmpty()) {
             media.setMetadata(metadata);
             Timestamp createDate = DateUtils.getCreateDate(metadata, media.getName());

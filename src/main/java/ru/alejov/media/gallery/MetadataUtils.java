@@ -20,8 +20,8 @@ public class MetadataUtils {
 
 
     @Nonnull
-    public static Map<MetaTag, String> getMetadata(Path path, String type) {
-        Map<MetaTag, String> metadata = Collections.emptyMap();
+    public static Map<String, String> getMetadata(Path path, String type) {
+        Map<String, String> metadata = Collections.emptyMap();
         if (type.equals("i")) {
             try {
                 ImageMetadata imageMetadata = Imaging.getMetadata(path.toFile());
@@ -35,7 +35,7 @@ public class MetadataUtils {
                     metadata = new TreeMap<>();
                     boolean hasSize = false;
                     for (Tag tag : tagList) {
-                        metadata.put(tag.key, tag.value);
+                        metadata.put(tag.key.name(), tag.value);
                         if (tag.key == MetaTag.ImageWidth || tag.key == MetaTag.ExifImageWidth) {
                             hasSize = true;
                         }
@@ -44,11 +44,11 @@ public class MetadataUtils {
                         BufferedImage bufferedImage = Imaging.getBufferedImage(path.toFile());
                         int width = bufferedImage.getWidth();
                         int height = bufferedImage.getHeight();
-                        metadata.put(MetaTag.ImageWidth, String.valueOf(width));
-                        metadata.put(MetaTag.ImageLength, String.valueOf(height));
+                        metadata.put(MetaTag.ImageWidth.name(), String.valueOf(width));
+                        metadata.put(MetaTag.ImageLength.name(), String.valueOf(height));
                     } else {
-                        metadata.put(MetaTag.ImageWidth, metadata.remove(MetaTag.ExifImageWidth));
-                        metadata.put(MetaTag.ImageLength, metadata.remove(MetaTag.ExifImageLength));
+                        metadata.put(MetaTag.ImageWidth.name(), metadata.remove(MetaTag.ExifImageWidth.name()));
+                        metadata.put(MetaTag.ImageLength.name(), metadata.remove(MetaTag.ExifImageLength.name()));
                     }
                 }
             } catch (Exception e) {
