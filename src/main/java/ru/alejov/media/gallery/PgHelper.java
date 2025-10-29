@@ -9,6 +9,7 @@ import javax.annotation.Nullable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -58,6 +59,7 @@ public class PgHelper {
                                                    + "   SET paths = ?::jsonb\n"
                                                    + " WHERE id = ?";
     private static final int LIMIT = 500;
+    private static final int COMMIT_CHUNK = 10_000;
     private final Logger log;
 
     public PgHelper(Logger log) {
@@ -67,14 +69,7 @@ public class PgHelper {
 
     public void fillEmptyDatabase(String jdbcPropertiesFilePath, List<Media> mediaList) throws IOException, SQLException {
         log.info("Start fillEmptyDatabase");
-        Properties properties = new Properties();
-        try (InputStream inputStream = Files.newInputStream(Paths.get(jdbcPropertiesFilePath))) {
-            properties.load(inputStream);
-        }
-        PGSimpleDataSource dataSource = new PGSimpleDataSource();
-        dataSource.setUrl(properties.getProperty("pg.url"));
-        dataSource.setUser(properties.getProperty("pg.user"));
-        dataSource.setPassword(properties.getProperty("pg.password"));
+        PGSimpleDataSource dataSource = getDataSource(jdbcPropertiesFilePath);
         boolean filled;
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(true);
@@ -111,18 +106,10 @@ public class PgHelper {
         if (mediaList.isEmpty()) {
             return;
         }
-        Properties properties = new Properties();
-        try (InputStream inputStream = Files.newInputStream(Paths.get(jdbcPropertiesFilePath))) {
-            properties.load(inputStream);
-        }
-        PGSimpleDataSource dataSource = new PGSimpleDataSource();
-        dataSource.setUrl(properties.getProperty("pg.url"));
-        dataSource.setUser(properties.getProperty("pg.user"));
-        dataSource.setPassword(properties.getProperty("pg.password"));
+        PGSimpleDataSource dataSource = getDataSource(jdbcPropertiesFilePath);
         AtomicInteger insertedCount = new AtomicInteger();
         AtomicInteger updatedCount = new AtomicInteger();
-        int commitChunk = 10_000;
-        int commitThreshold = commitChunk;
+        int commitThreshold = COMMIT_CHUNK;
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             try (PreparedStatement selectStatement = connection.prepareStatement(SELECT_SQL);
@@ -157,7 +144,7 @@ public class PgHelper {
                         }
                         if (insertedCount.get() + updatedCount.get() > commitThreshold) {
                             connection.commit();
-                            commitThreshold += commitChunk;
+                            commitThreshold += COMMIT_CHUNK;
                         }
                     }
                     if (dbMedia == null && media != null) {
@@ -208,13 +195,25 @@ public class PgHelper {
                 //записи абсолютно одинаковые, допишем путь, если это другое устройство
                 Map<String, String> paths = media.getPaths();
                 String device = paths.keySet().iterator().next();
-                if (!dbMedia.paths.containsKey(device)) {
+                String path = dbMedia.paths.get(device);
+                if (path == null) {
                     dbMedia.paths.putAll(paths);
                     updatePathsStmt.setString(1, OBJECT_MAPPER.writeValueAsString(dbMedia.paths));
                     updatePathsStmt.setLong(2, dbMedia.id);
                     updatePathsStmt.executeUpdate();
                     log.info("File '{}' merged with other path: {}", dbMedia.name, toLogPath(paths));
                     updatedCount.incrementAndGet();
+                } else {
+                    //если это то же устройство, обновим путь при перемещении
+                    Path absolutePath = media.getLocalPath().toAbsolutePath();
+                    if (!absolutePath.toString().equals(path)) {
+                        dbMedia.paths.putAll(paths);
+                        updatePathsStmt.setString(1, OBJECT_MAPPER.writeValueAsString(dbMedia.paths));
+                        updatePathsStmt.setLong(2, dbMedia.id);
+                        updatePathsStmt.executeUpdate();
+                        log.info("File '{}' relocated to new path: {}", dbMedia.name, absolutePath);
+                        updatedCount.incrementAndGet();
+                    }
                 }
             } else if (dbMedia.md5Hash == null) {
                 //допишем в БД md5
@@ -344,6 +343,18 @@ public class PgHelper {
             stringBuilder.append(entry.getKey()).append("->").append(entry.getValue());
         }
         return stringBuilder.toString();
+    }
+
+    private static PGSimpleDataSource getDataSource(String jdbcPropertiesFilePath) throws IOException {
+        Properties properties = new Properties();
+        try (InputStream inputStream = Files.newInputStream(Paths.get(jdbcPropertiesFilePath))) {
+            properties.load(inputStream);
+        }
+        PGSimpleDataSource dataSource = new PGSimpleDataSource();
+        dataSource.setUrl(properties.getProperty("pg.url"));
+        dataSource.setUser(properties.getProperty("pg.user"));
+        dataSource.setPassword(properties.getProperty("pg.password"));
+        return dataSource;
     }
 
 
