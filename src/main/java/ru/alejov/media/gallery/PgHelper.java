@@ -3,10 +3,10 @@ package ru.alejov.media.gallery;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.postgresql.ds.PGSimpleDataSource;
-import org.postgresql.util.PSQLException;
 import org.slf4j.Logger;
 
 import javax.annotation.Nullable;
+import javax.sql.DataSource;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -29,12 +29,34 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class PgHelper {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final String INSERT_OR_SELECT_SQL = ""
+                                                       + "WITH sel AS (\n"
+                                                       + "     SELECT *\n"
+                                                       + "       FROM media\n"
+                                                       + "      WHERE name = ?),\n"
+                                                       + "ins AS (\n"
+                                                       + "     INSERT INTO media(name, create_date, metadata, paths, type, file_size, hash_md5, last_modify)\n"
+                                                       + "     VALUES (?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?)\n"
+                                                       + "     ON CONFLICT (name)\n"
+                                                       + "     DO NOTHING\n"
+                                                       + "     RETURNING *)\n"
+                                                       + "SELECT *,\n"
+                                                       + "       false AS new_file\n"
+                                                       + "  FROM sel\n"
+                                                       + "UNION ALL\n"
+                                                       + "SELECT *,\n"
+                                                       + "       true AS new_file\n"
+                                                       + "  FROM ins";
     private static final String INSERT_SQL = ""
                                              + "INSERT INTO media(name, create_date, metadata, paths, type, file_size, hash_md5, last_modify)\n"
                                              + "VALUES (?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?)\n"
                                              + "ON CONFLICT (name)\n"
                                              + "DO NOTHING\n"
                                              + "RETURNING id";
+    private static final String SELECT_BY_NAME = ""
+                                                 + "SELECT *\n"
+                                                 + "  FROM media\n"
+                                                 + " WHERE name = ?";
     private static final String TEST_SELECT = ""
                                               + "SELECT name\n"
                                               + "  FROM media\n"
@@ -69,10 +91,9 @@ public class PgHelper {
         this.log = log;
     }
 
-
     public void fillEmptyDatabase(String jdbcPropertiesFilePath, List<Media> mediaList) throws IOException, SQLException {
         log.info("Start fillEmptyDatabase");
-        PGSimpleDataSource dataSource = getDataSource(jdbcPropertiesFilePath);
+        DataSource dataSource = getDataSource(jdbcPropertiesFilePath);
         boolean filled;
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(true);
@@ -103,176 +124,16 @@ public class PgHelper {
         }
     }
 
-    @SuppressWarnings("StatementWithEmptyBody")
     public void mergeToDatabase(String jdbcPropertiesFilePath, List<Media> mediaList, String hostName) throws IOException, SQLException {
         log.info("Start mergeToDatabase");
         if (mediaList.isEmpty()) {
             return;
         }
-        PGSimpleDataSource dataSource = getDataSource(jdbcPropertiesFilePath);
-        AtomicInteger insertedCount = new AtomicInteger();
-        AtomicInteger updatedCount = new AtomicInteger();
-        int commitThreshold = COMMIT_CHUNK;
-        try (Connection connection = dataSource.getConnection()) {
-            connection.setAutoCommit(false);
-            try (PreparedStatement selectStatement = connection.prepareStatement(SELECT_SQL);
-                 PreparedStatement insertStmt = connection.prepareStatement(INSERT_SQL);
-                 PreparedStatement updateMd5Statement = connection.prepareStatement(UPDATE_MD5_SQL);
-                 PreparedStatement updateNameStmt = connection.prepareStatement(UPDATE_NAME_SQL);
-                 PreparedStatement updatePathsStmt = connection.prepareStatement(UPDATE_PATHS_SQL)) {
-                selectStatement.setFetchSize(LIMIT);
-                Iterator<Media> mediaIterator = mediaList.iterator();
-                Media media = nextMedia(mediaIterator);
-                try (ResultSet resultSet = selectStatement.executeQuery()) {
-                    DbMedia dbMedia = nextFromDb(resultSet);
-                    while (dbMedia != null && media != null) {
-                        int compared = media.getName().compareTo(dbMedia.name);
-                        if (compared == 0) {
-                            mergeSameFiles(media, dbMedia, updatePathsStmt, updateMd5Statement, updateNameStmt, insertStmt, insertedCount, updatedCount);
-                            dbMedia = nextFromDb(resultSet);
-                            media = nextMedia(mediaIterator);
-                        } else if (compared > 0) {
-                            //Файл в памяти больше, чем в базе - возможно файл удалили. Но он может быть на другом устройстве.
-                            //Ничего не делаем, выбираем следующий из базы
-                            logFileNotExists(hostName, dbMedia);
-                            dbMedia = nextFromDb(resultSet);
-                        } else {
-                            //Файл в базе больше, чем в памяти. Файл надо добавить.
-                            fillInsertStatement(media, insertStmt, media.getName());
-                            boolean inserted = false;
-                            try (ResultSet resultSetLocal = insertStmt.executeQuery()) {
-                                if (resultSetLocal.next()) {
-                                    inserted = true;
-                                    log.info("File '{}' inserted", getLocalPath(media));
-                                } else {
-                                    String newName = "autorenamed_" + media.getName();
-                                    fillInsertStatement(media, insertStmt, newName);
-                                    try (ResultSet resultSet2 = insertStmt.executeQuery()) {
-                                        if (resultSet2.next()) {
-                                            inserted = true;
-                                            log.info("File '{}' inserted with new name: {}", getLocalPath(media), newName);
-                                        } else {
-                                            log.info("File '{}' already exist, skipped", getLocalPath(media));
-                                        }
-                                    }
-                                }
-                            }
-                            if (inserted) {
-                                insertedCount.incrementAndGet();
-                            }
-                            //Выбираем следующий из памяти
-                            media = nextMedia(mediaIterator);
-                        }
-                        if (insertedCount.get() + updatedCount.get() > commitThreshold) {
-                            connection.commit();
-                            commitThreshold += COMMIT_CHUNK;
-                        }
-                    }
-                    if (dbMedia == null && media != null) {
-                        //нет больше записей в БД
-                        fillInsertStatement(media, insertStmt, media.getName());
-                        insertStmt.execute();
-                        insertedCount.incrementAndGet();
-                        log.info("File '{}' inserted", getLocalPath(media));
-
-                        int count = insertRestMedia(mediaIterator, insertStmt);
-                        if (count > 0) {
-                            insertedCount.addAndGet(count);
-                            log.info("Inserted '{}' new files", count);
-                        }
-                    } else if (dbMedia != null) {
-                        //остальное есть в БД, пропускаем
-                    } else {
-                        //ничего не осталось
-                    }
-                }
-                connection.commit();
-            }
+        DataSource dataSource = getDataSource(jdbcPropertiesFilePath);
+        try (DbProcessor dbProcessor = new DbProcessor(dataSource, log)) {
+            dbProcessor.process(mediaList, hostName);
         }
-        log.info("Finish mergeToDatabase. Inserted rows: {}, updated rows: {}", insertedCount, updatedCount);
-    }
-
-    private static String getLocalPath(Media media) {
-        Path localPath = media.getLocalPath();
-        String name = media.getName();
-        String localPathStr = "UNKNOWN";
-        if (localPath != null) {
-            localPathStr = localPath.toString();
-        }
-        return name + " (" + localPathStr + ")";
-    }
-
-    private void logFileNotExists(String hostName, DbMedia dbMedia) {
-        String path = dbMedia.paths.get(hostName);
-        if (path != null) {
-            log.warn("File '{}' not exists in current device by path: '{}'", dbMedia.name, path);
-        } else {
-            log.warn("File '{}' from another device", dbMedia.name);
-        }
-    }
-
-    @SuppressWarnings("StatementWithEmptyBody")
-    private void mergeSameFiles(Media media,
-                                DbMedia dbMedia,
-                                PreparedStatement updatePathsStmt,
-                                PreparedStatement updateMd5Statement,
-                                PreparedStatement updateNameStmt,
-                                PreparedStatement insertStmt,
-                                AtomicInteger insertedCount,
-                                AtomicInteger updatedCount) throws SQLException, JsonProcessingException {
-        //Записи одинаковые. Проверяем fileSize и md5
-        if (media.getSize() == dbMedia.fileSize) {
-            if (media.getLastModify().equals(dbMedia.lastModify) || Objects.equals(media.getMd5Hash(), dbMedia.md5Hash)) {
-                //записи абсолютно одинаковые, допишем путь, если это другое устройство
-                Map<String, String> paths = media.getPaths();
-                String device = paths.keySet().iterator().next();
-                String path = dbMedia.paths.get(device);
-                if (path == null) {
-                    dbMedia.paths.putAll(paths);
-                    updatePathsStmt.setString(1, OBJECT_MAPPER.writeValueAsString(dbMedia.paths));
-                    updatePathsStmt.setLong(2, dbMedia.id);
-                    updatePathsStmt.executeUpdate();
-                    log.info("File '{}' merged with other path: {}", dbMedia.name, toLogPath(paths));
-                    updatedCount.incrementAndGet();
-                } else {
-                    Path localPath = media.getLocalPath();
-                    if (localPath != null) {
-                        //если это то же устройство, обновим путь при перемещении
-                        Path absolutePath = localPath.toAbsolutePath();
-                        if (!absolutePath.toString().equals(path)) {
-                            dbMedia.paths.putAll(paths);
-                            updatePathsStmt.setString(1, OBJECT_MAPPER.writeValueAsString(dbMedia.paths));
-                            updatePathsStmt.setLong(2, dbMedia.id);
-                            updatePathsStmt.executeUpdate();
-                            log.info("File '{}' relocated to new path: {}", dbMedia.name, absolutePath);
-                            updatedCount.incrementAndGet();
-                        }
-                    }
-                }
-            } else if (dbMedia.md5Hash == null) {
-                //допишем в БД md5
-                updateMd5Statement.setString(1, media.getMd5Hash());
-                updateMd5Statement.setLong(2, dbMedia.id);
-                updateMd5Statement.executeUpdate();
-                log.info("File '{}' merged with MD5: {}", dbMedia.name, media.getMd5Hash());
-                updatedCount.incrementAndGet();
-            } else {
-                //в базе есть хеш, в памяти нет, пропускаем
-            }
-        } else {
-            //Разные файлы с одним названием. Считаем, что в базе устарел, запишем старый файл с другим именем
-            //Новый запишем с актуальным именем
-            String newName = "autorenamed_" + dbMedia.name;
-            updateNameStmt.setString(1, newName);
-            updateNameStmt.setLong(2, dbMedia.id);
-            updateNameStmt.executeUpdate();
-            updatedCount.incrementAndGet();
-            log.info("File with ID: {}, name: '{}' in database in obsolete. Renamed to '{}'", dbMedia.id, dbMedia.name, newName);
-            fillInsertStatement(media, insertStmt, media.getName());
-            insertStmt.execute();
-            log.info("File '{}' inserted", media.getName());
-            insertedCount.incrementAndGet();
-        }
+        log.info("Finish mergeToDatabase");
     }
 
     @Nullable
@@ -284,35 +145,6 @@ public class PgHelper {
             media = null;
         }
         return media;
-    }
-
-    @Nullable
-    private static DbMedia nextFromDb(ResultSet resultSet) throws SQLException, JsonProcessingException {
-        if (resultSet.next()) {
-            return DbMedia.from(resultSet);
-        } else {
-            return null;
-        }
-    }
-
-    private int insertRestMedia(Iterator<Media> mediaIterator, PreparedStatement insertStmt) throws SQLException, JsonProcessingException {
-        int total = 0;
-        int batch = 0;
-        while (mediaIterator.hasNext()) {
-            Media media = mediaIterator.next();
-            fillInsertStatement(media, insertStmt, media.getName());
-            log.info("File '{}' inserted", media.getName());
-            insertStmt.addBatch();
-            ++total;
-            ++batch;
-            if (batch > LIMIT) {
-                insertStmt.executeBatch();
-                batch = 0;
-            }
-        }
-        insertStmt.executeBatch();
-        return total;
-
     }
 
     private static class DbMedia {
@@ -356,21 +188,21 @@ public class PgHelper {
     }
 
     private static void fillInsertStatement(Media media,
-                                            PreparedStatement preparedStatement,
+                                            PreparedStatement insertStatement,
                                             String mediaName) throws SQLException, JsonProcessingException {
-        preparedStatement.setString(1, mediaName);
-        preparedStatement.setTimestamp(2, media.getCreatedAt());
-        preparedStatement.setString(3, OBJECT_MAPPER.writeValueAsString(media.getMetadata()));
-        preparedStatement.setString(4, OBJECT_MAPPER.writeValueAsString(media.getPaths()));
-        preparedStatement.setString(5, media.getType());
-        preparedStatement.setLong(6, media.getSize());
+        insertStatement.setString(1, mediaName);
+        insertStatement.setTimestamp(2, media.getCreatedAt());
+        insertStatement.setString(3, OBJECT_MAPPER.writeValueAsString(media.getMetadata()));
+        insertStatement.setString(4, OBJECT_MAPPER.writeValueAsString(media.getPaths()));
+        insertStatement.setString(5, media.getType());
+        insertStatement.setLong(6, media.getSize());
         String md5Hash = media.getMd5Hash();
         if (md5Hash != null) {
-            preparedStatement.setString(7, md5Hash);
+            insertStatement.setString(7, md5Hash);
         } else {
-            preparedStatement.setNull(7, Types.VARCHAR);
+            insertStatement.setNull(7, Types.VARCHAR);
         }
-        preparedStatement.setTimestamp(8, media.getLastModify());
+        insertStatement.setTimestamp(8, media.getLastModify());
     }
 
     private static String toLogPath(Map<String, String> paths) {
@@ -381,7 +213,7 @@ public class PgHelper {
         return stringBuilder.toString();
     }
 
-    private static PGSimpleDataSource getDataSource(String jdbcPropertiesFilePath) throws IOException {
+    private static DataSource getDataSource(String jdbcPropertiesFilePath) throws IOException {
         Properties properties = new Properties();
         try (InputStream inputStream = Files.newInputStream(Paths.get(jdbcPropertiesFilePath))) {
             properties.load(inputStream);
@@ -393,5 +225,265 @@ public class PgHelper {
         return dataSource;
     }
 
+    private static class DbProcessor implements AutoCloseable {
+
+        private final AtomicInteger insertedCount;
+        private final AtomicInteger updatedCount;
+        private final DataSource dataSource;
+        private final Logger log;
+        private Connection connection;
+        private PreparedStatement insertStmt;
+        private PreparedStatement selectByNameStmt;
+        private PreparedStatement insertOrSelectStmt;
+        private PreparedStatement updateMd5Statement;
+        private PreparedStatement updateNameStmt;
+        private PreparedStatement updatePathsStmt;
+        private int commitThreshold = PgHelper.COMMIT_CHUNK;
+
+        public DbProcessor(DataSource dataSource, Logger log) {
+            this.dataSource = dataSource;
+            this.log = log;
+            insertedCount = new AtomicInteger();
+            updatedCount = new AtomicInteger();
+        }
+
+        @Override
+        public void close() {
+            try {
+                connection.close();
+            } catch (SQLException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        public void process(List<Media> mediaList, String hostName) throws SQLException, JsonProcessingException {
+            connection = dataSource.getConnection();
+            connection.setAutoCommit(false);
+            connection.setTransactionIsolation(Connection.TRANSACTION_READ_UNCOMMITTED);
+            insertStmt = connection.prepareStatement(INSERT_SQL);
+            selectByNameStmt = connection.prepareStatement(SELECT_BY_NAME);
+            insertOrSelectStmt = connection.prepareStatement(INSERT_OR_SELECT_SQL);
+            updateMd5Statement = connection.prepareStatement(UPDATE_MD5_SQL);
+            updateNameStmt = connection.prepareStatement(UPDATE_NAME_SQL);
+            updatePathsStmt = connection.prepareStatement(UPDATE_PATHS_SQL);
+
+            PreparedStatement selectStatement = connection.prepareStatement(SELECT_SQL);
+            selectStatement.setFetchSize(LIMIT);
+            Iterator<Media> mediaIterator = mediaList.iterator();
+            Media media = nextMedia(mediaIterator);
+            try (ResultSet resultSet = selectStatement.executeQuery()) {
+                DbMedia dbMedia = nextFromDb(resultSet);
+                while (dbMedia != null && media != null) {
+                    int compared = media.getName().compareTo(dbMedia.name);
+                    if (compared == 0) {
+                        mergeSameFiles(media, dbMedia);
+                        dbMedia = nextFromDb(resultSet);
+                        media = nextMedia(mediaIterator);
+                    } else if (compared > 0) {
+                        //Файл в памяти больше, чем в базе - возможно файл удалили. Но он может быть на другом устройстве.
+                        //Ничего не делаем, выбираем следующий из базы
+                        logFileNotExists(hostName, dbMedia);
+                        dbMedia = nextFromDb(resultSet);
+                    } else {
+                        //Файл в базе больше, чем в памяти. Файл надо добавить.
+                        DbMedia existed = tryInsert(media, media.getName());
+                        if (existed == null) {
+                            this.log.info("File '{}' inserted", getLocalPath(media));
+                            insertedCount.incrementAndGet();
+                        } else {
+                            mergeSameFiles(media, existed);
+                        }
+                        //Выбираем следующий из памяти
+                        media = nextMedia(mediaIterator);
+                    }
+                    if (insertedCount.get() + updatedCount.get() > commitThreshold) {
+                        connection.commit();
+                        commitThreshold += COMMIT_CHUNK;
+                    }
+                }
+                if (dbMedia == null && media != null) {
+                    //нет больше записей в БД
+                    fillInsertStatement(media, insertStmt, media.getName());
+                    insertStmt.execute();
+                    insertedCount.incrementAndGet();
+                    this.log.info("File '{}' inserted", getLocalPath(media));
+
+                    int count = insertRestMedia(mediaIterator);
+                    if (count > 0) {
+                        insertedCount.addAndGet(count);
+                        this.log.info("Inserted '{}' new files", count);
+                    }
+                } else if (dbMedia != null) {
+                    //остальное есть в БД, пропускаем
+                } else {
+                    //ничего не осталось
+                }
+            }
+            connection.commit();
+            this.log.info("Finish process. Inserted rows: {}, updated rows: {}", insertedCount, updatedCount);
+        }
+
+        @Nullable
+        private DbMedia tryInsert(Media media, String mediaName) throws SQLException, JsonProcessingException {
+            fillInsertOrSelectStatement(media, mediaName);
+            DbMedia existed = null;
+            try (ResultSet resultSetLocal = insertOrSelectStmt.executeQuery()) {
+                if (resultSetLocal.next()) {
+                    boolean inserted = resultSetLocal.getBoolean("new_file");
+                    if (!inserted) {
+                        existed = DbMedia.from(resultSetLocal);
+                    }
+                }
+            }
+            return existed;
+        }
+
+        @Nullable
+        private static DbMedia nextFromDb(ResultSet resultSet) throws SQLException, JsonProcessingException {
+            if (resultSet.next()) {
+                return DbMedia.from(resultSet);
+            } else {
+                return null;
+            }
+        }
+
+        private void mergeSameFiles(
+                Media media,
+                DbMedia dbMedia) throws SQLException, JsonProcessingException {
+            //Записи одинаковые. Проверяем fileSize и md5
+            if (media.getSize() == dbMedia.fileSize) {
+                if (media.getLastModify().equals(dbMedia.lastModify) || Objects.equals(media.getMd5Hash(), dbMedia.md5Hash)) {
+                    //записи абсолютно одинаковые, допишем путь, если это другое устройство
+                    Map<String, String> paths = media.getPaths();
+                    String device = paths.keySet().iterator().next();
+                    String path = dbMedia.paths.get(device);
+                    if (path == null) {
+                        dbMedia.paths.putAll(paths);
+                        updatePathsStmt.setString(1, OBJECT_MAPPER.writeValueAsString(dbMedia.paths));
+                        updatePathsStmt.setLong(2, dbMedia.id);
+                        updatePathsStmt.executeUpdate();
+                        this.log.info("File '{}' merged with other path: {}", dbMedia.name, toLogPath(paths));
+                        updatedCount.incrementAndGet();
+                        return;
+                    }
+                    Path localPath = media.getLocalPath();
+                    if (localPath != null) {
+                        //если это то же устройство, обновим путь при перемещении
+                        Path absolutePath = localPath.toAbsolutePath();
+                        if (!absolutePath.toString().equals(path)) {
+                            dbMedia.paths.putAll(paths);
+                            updatePathsStmt.setString(1, OBJECT_MAPPER.writeValueAsString(dbMedia.paths));
+                            updatePathsStmt.setLong(2, dbMedia.id);
+                            updatePathsStmt.executeUpdate();
+                            this.log.info("File '{}' relocated to new path: {}", dbMedia.name, absolutePath);
+                            updatedCount.incrementAndGet();
+                            return;
+                        }
+                    }
+                    this.log.info("File '{}' already exists", media.getName());
+                } else if (dbMedia.md5Hash == null) {
+                    //допишем в БД md5
+                    updateMd5Statement.setString(1, media.getMd5Hash());
+                    updateMd5Statement.setLong(2, dbMedia.id);
+                    updateMd5Statement.executeUpdate();
+                    this.log.info("File '{}' merged with MD5: {}", dbMedia.name, media.getMd5Hash());
+                    updatedCount.incrementAndGet();
+                } else {
+                    //в базе есть хеш, в памяти нет, пропускаем
+                }
+            } else {
+                //Разные файлы с одним названием. Новый запишем с новым именем
+                DbMedia dbMediaRenamed = null;
+                String newName = "autorenamed_" + media.getName();
+                int index = 1;
+                do {
+                    selectByNameStmt.setString(1, newName);
+                    try (ResultSet resultSet = selectByNameStmt.executeQuery()) {
+                        dbMediaRenamed = nextFromDb(resultSet);
+                    }
+                    if (dbMediaRenamed != null) {
+                        //Сравниваем файлы. Если он один и тот же - пропускаем
+                        boolean diff = false;
+                        if (media.getSize() == dbMediaRenamed.fileSize) {
+                            if (!media.getLastModify().equals(dbMediaRenamed.lastModify) && !Objects.equals(media.getMd5Hash(), dbMediaRenamed.md5Hash)) {
+                                diff = true;
+                            }
+                        } else {
+                           diff = true;
+                        }
+                        if (diff) {
+                            newName = "autorenamed_" + index + "_" + dbMedia.name;
+                            ++index;
+                        } else {
+                            this.log.info("File '{}' already exists", newName);
+                            return;
+                        }
+                    }
+                } while (dbMediaRenamed != null);
+                DbMedia existed = tryInsert(media, newName);
+                if (existed == null) {
+                    this.log.info("File '{}' inserted", newName);
+                    insertedCount.incrementAndGet();
+                }
+            }
+        }
+
+
+        private int insertRestMedia(Iterator<Media> mediaIterator) throws SQLException, JsonProcessingException {
+            int total = 0;
+            int batch = 0;
+            while (mediaIterator.hasNext()) {
+                Media media = mediaIterator.next();
+                fillInsertStatement(media, insertStmt, media.getName());
+                log.info("File '{}' inserted", media.getName());
+                insertStmt.addBatch();
+                ++total;
+                ++batch;
+                if (batch > LIMIT) {
+                    insertStmt.executeBatch();
+                    batch = 0;
+                }
+            }
+            insertStmt.executeBatch();
+            return total;
+        }
+
+        private void fillInsertOrSelectStatement(Media media,
+                                                 String mediaName) throws SQLException, JsonProcessingException {
+            insertOrSelectStmt.setString(1, mediaName);
+            insertOrSelectStmt.setString(2, mediaName);
+            insertOrSelectStmt.setTimestamp(3, media.getCreatedAt());
+            insertOrSelectStmt.setString(4, OBJECT_MAPPER.writeValueAsString(media.getMetadata()));
+            insertOrSelectStmt.setString(5, OBJECT_MAPPER.writeValueAsString(media.getPaths()));
+            insertOrSelectStmt.setString(6, media.getType());
+            insertOrSelectStmt.setLong(7, media.getSize());
+            String md5Hash = media.getMd5Hash();
+            if (md5Hash != null) {
+                insertOrSelectStmt.setString(8, md5Hash);
+            } else {
+                insertOrSelectStmt.setNull(8, Types.VARCHAR);
+            }
+            insertOrSelectStmt.setTimestamp(9, media.getLastModify());
+        }
+
+        private static String getLocalPath(Media media) {
+            Path localPath = media.getLocalPath();
+            String name = media.getName();
+            String localPathStr = "UNKNOWN";
+            if (localPath != null) {
+                localPathStr = localPath.toString();
+            }
+            return name + " (" + localPathStr + ")";
+        }
+
+        private void logFileNotExists(String hostName, DbMedia dbMedia) {
+            String path = dbMedia.paths.get(hostName);
+            if (path != null) {
+                log.warn("File '{}' not exists in current device by path: '{}'", dbMedia.name, path);
+            } else {
+                log.warn("File '{}' from another device", dbMedia.name);
+            }
+        }
+    }
 
 }

@@ -298,6 +298,9 @@ public class FillContentHelper {
                 createDate = Timestamp.from(creationTime.toInstant());
             }
             Timestamp lastModify = Timestamp.from(attributes.lastModifiedTime().toInstant());
+            if (lastModify.before(createDate)) {
+                createDate = lastModify;
+            }
             Path absolutePath = path.toAbsolutePath();
             Map<String, String> paths = Collections.singletonMap(systemName, absolutePath.toString());
             return new Media(fileName, createDate, lastModify, paths, null, path.toFile().length(), type, Collections.emptyMap(), absolutePath);

@@ -27,6 +27,9 @@ public class JsonIOHelper {
         List<Media> mediaList = new ArrayList<>(files.length);
         for (Map<String, Object> map : files) {
             String name = (String) map.get("name");
+            if (name.startsWith(".trashed")) {
+                continue;
+            }
             Timestamp createdAt = new Timestamp((Long) map.get("createdAt"));
             Timestamp lastModify = new Timestamp((Long) map.get("lastModify"));
             Map<String, String> paths = (Map<String, String>) map.get("paths");
