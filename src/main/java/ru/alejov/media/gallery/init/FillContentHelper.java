@@ -5,7 +5,6 @@ import org.slf4j.LoggerFactory;
 import ru.alejov.media.gallery.DateUtils;
 import ru.alejov.media.gallery.JsonIOHelper;
 import ru.alejov.media.gallery.Media;
-import ru.alejov.media.gallery.MetaTag;
 import ru.alejov.media.gallery.MetadataUtils;
 import ru.alejov.media.gallery.PgHelper;
 
@@ -49,6 +48,7 @@ public class FillContentHelper {
     private static final String PG_SETTINGS_PATH = "pg-settings-path";
     private static final String PARALLEL = "parallel";
     private static final String CALCULATE_MD5 = "calculate-hash";
+    private static final String DETAIL_LOG = "detail-log";
 
     private static final Predicate<Path> IS_FILE = (Path path) -> !Files.isDirectory(path);
 
@@ -90,10 +90,11 @@ public class FillContentHelper {
                     String sourceFile = params.get(SOURCE_FILE);
                     boolean parallel = Boolean.parseBoolean(params.getOrDefault(PARALLEL, "false"));
                     boolean calculateMd5 = Boolean.parseBoolean(params.getOrDefault(CALCULATE_MD5, "false"));
+                    boolean detailLog = Boolean.parseBoolean(params.getOrDefault(DETAIL_LOG, "false"));
                     if (rootDir != null) {
-                        incrementalFillFromDir(rootDir, pgSettingsPath, parallel, calculateMd5);
+                        incrementalFillFromDir(rootDir, pgSettingsPath, parallel, calculateMd5, detailLog);
                     } else if (sourceFile != null) {
-                        incrementalFillFromFile(new File(sourceFile), pgSettingsPath, parallel);
+                        incrementalFillFromFile(new File(sourceFile), pgSettingsPath, parallel, detailLog);
                     } else {
                         System.out.println("Missing any parameters: " + Arrays.asList(ROOT_DIR, SOURCE_FILE));
                     }
@@ -101,7 +102,8 @@ public class FillContentHelper {
                     System.out.println("Missing parameter: " + PG_SETTINGS_PATH);
                 }
             } else if (params.containsKey(HELP)) {
-                System.out.println("Example: [--primary-fill | --incremental-fill] root-dir=\"rootDirectory\" [pg-settings-path=\"path to jdbc.properties\"] [parallel=true] [calculate-hash=true]");
+                System.out.println("Example: [--primary-fill | --incremental-fill] root-dir=\"rootDirectory\" "
+                                   + "[pg-settings-path=\"path to jdbc.properties\"] [parallel=true] [calculate-hash=true] [detail-log=true]");
             } else {
                 System.out.println("Unknown command. Only " + Arrays.asList(PRIMARY_FILL, INCREMENTAL_FILL, HELP) + " is supported now");
             }
@@ -112,19 +114,21 @@ public class FillContentHelper {
 
     private static void incrementalFillFromFile(File sourceFile,
                                                 @Nonnull String jdbcPropertiesFile,
-                                                boolean parallel) throws IOException, SQLException {
-        log.info("Start incrementalFillFromFile(parallel={})", parallel);
+                                                boolean parallel,
+                                                boolean detailLog) throws IOException, SQLException {
+        log.info("Start incrementalFillFromFile(parallel={}, detailLog={})", parallel, detailLog);
         String hostName = getHostName();
         List<Media> mediaList = collectMediaFromFile(sourceFile);
-        log.info("Finish incrementalFillFromFile(parallel={})", parallel);
-        new PgHelper(log).mergeToDatabase(jdbcPropertiesFile, mediaList, hostName);
+        log.info("Finish incrementalFillFromFile");
+        new PgHelper(log).mergeToDatabase(jdbcPropertiesFile, mediaList, hostName, detailLog);
     }
 
     private static void incrementalFillFromDir(String rootDirectory,
                                                @Nonnull String jdbcPropertiesFile,
                                                boolean parallel,
-                                               boolean calculateMd5) throws IOException, SQLException {
-        log.info("Start incrementalFillFromDir(parallel={})", parallel);
+                                               boolean calculateMd5,
+                                               boolean detailLog) throws IOException, SQLException {
+        log.info("Start incrementalFillFromDir(parallel={}, detailLog={})", parallel, detailLog);
         Properties supportedExtensions = getSupportedExtensions();
         Set<String> unsupportedExtensions = new LinkedHashSet<>();
         String hostName = getHostName();
@@ -135,8 +139,8 @@ public class FillContentHelper {
         if (calculateMd5) {
             calculateMd5(parallel, mediaList);
         }
-        log.info("Finish incrementalFillFromDir(parallel={})", parallel);
-        new PgHelper(log).mergeToDatabase(jdbcPropertiesFile, mediaList, hostName);
+        log.info("Finish incrementalFillFromDir");
+        new PgHelper(log).mergeToDatabase(jdbcPropertiesFile, mediaList, hostName, detailLog);
     }
 
     private static void primaryFill(String rootDirectory, String jdbcPropertiesFile, boolean parallel, boolean calculateMd5) throws IOException, SQLException {

@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @SuppressWarnings("ConcatenationWithEmptyString")
@@ -124,13 +125,13 @@ public class PgHelper {
         }
     }
 
-    public void mergeToDatabase(String jdbcPropertiesFilePath, List<Media> mediaList, String hostName) throws IOException, SQLException {
+    public void mergeToDatabase(String jdbcPropertiesFilePath, List<Media> mediaList, String hostName, boolean detailLog) throws IOException, SQLException {
         log.info("Start mergeToDatabase");
         if (mediaList.isEmpty()) {
             return;
         }
         DataSource dataSource = getDataSource(jdbcPropertiesFilePath);
-        try (DbProcessor dbProcessor = new DbProcessor(dataSource, log)) {
+        try (DbProcessor dbProcessor = new DbProcessor(dataSource, log, detailLog)) {
             dbProcessor.process(mediaList, hostName);
         }
         log.info("Finish mergeToDatabase");
@@ -229,22 +230,28 @@ public class PgHelper {
 
         private final AtomicInteger insertedCount;
         private final AtomicInteger updatedCount;
+        private final AtomicInteger existsHereCount;
+        private final AtomicInteger existsElsewhereCount;
         private final DataSource dataSource;
         private final Logger log;
+        private final boolean detailLog;
+
         private Connection connection;
         private PreparedStatement insertStmt;
         private PreparedStatement selectByNameStmt;
         private PreparedStatement insertOrSelectStmt;
         private PreparedStatement updateMd5Statement;
-        private PreparedStatement updateNameStmt;
         private PreparedStatement updatePathsStmt;
         private int commitThreshold = PgHelper.COMMIT_CHUNK;
 
-        public DbProcessor(DataSource dataSource, Logger log) {
+        public DbProcessor(DataSource dataSource, Logger log, boolean detailLog) {
             this.dataSource = dataSource;
             this.log = log;
+            this.detailLog = detailLog;
             insertedCount = new AtomicInteger();
             updatedCount = new AtomicInteger();
+            existsHereCount = new AtomicInteger();
+            existsElsewhereCount = new AtomicInteger();
         }
 
         @Override
@@ -264,7 +271,6 @@ public class PgHelper {
             selectByNameStmt = connection.prepareStatement(SELECT_BY_NAME);
             insertOrSelectStmt = connection.prepareStatement(INSERT_OR_SELECT_SQL);
             updateMd5Statement = connection.prepareStatement(UPDATE_MD5_SQL);
-            updateNameStmt = connection.prepareStatement(UPDATE_NAME_SQL);
             updatePathsStmt = connection.prepareStatement(UPDATE_PATHS_SQL);
 
             PreparedStatement selectStatement = connection.prepareStatement(SELECT_SQL);
@@ -276,7 +282,7 @@ public class PgHelper {
                 while (dbMedia != null && media != null) {
                     int compared = media.getName().compareTo(dbMedia.name);
                     if (compared == 0) {
-                        mergeSameFiles(media, dbMedia);
+                        mergeSameFiles(media, dbMedia, hostName);
                         dbMedia = nextFromDb(resultSet);
                         media = nextMedia(mediaIterator);
                     } else if (compared > 0) {
@@ -291,7 +297,7 @@ public class PgHelper {
                             this.log.info("File '{}' inserted", getLocalPath(media));
                             insertedCount.incrementAndGet();
                         } else {
-                            mergeSameFiles(media, existed);
+                            mergeSameFiles(media, existed, hostName);
                         }
                         //Выбираем следующий из памяти
                         media = nextMedia(mediaIterator);
@@ -320,7 +326,8 @@ public class PgHelper {
                 }
             }
             connection.commit();
-            this.log.info("Finish process. Inserted rows: {}, updated rows: {}", insertedCount, updatedCount);
+            this.log.info("Finish process. Inserted rows: {}, updated rows: {}, exists here: {}, exists elsewhere: {}",
+                          insertedCount, updatedCount, existsHereCount, existsElsewhereCount);
         }
 
         @Nullable
@@ -347,53 +354,58 @@ public class PgHelper {
             }
         }
 
-        private void mergeSameFiles(
-                Media media,
-                DbMedia dbMedia) throws SQLException, JsonProcessingException {
+        private void mergeSameFiles(Media media, DbMedia dbMedia, String hostName) throws SQLException, JsonProcessingException {
             //Записи одинаковые. Проверяем fileSize и md5
             if (media.getSize() == dbMedia.fileSize) {
                 if (media.getLastModify().equals(dbMedia.lastModify) || Objects.equals(media.getMd5Hash(), dbMedia.md5Hash)) {
                     //записи абсолютно одинаковые, допишем путь, если это другое устройство
                     Map<String, String> paths = media.getPaths();
-                    String device = paths.keySet().iterator().next();
-                    String path = dbMedia.paths.get(device);
-                    if (path == null) {
+                    if (dbMedia.paths.keySet().containsAll(paths.keySet())) {
+                        Path localPath = media.getLocalPath();
+                        if (localPath != null) {
+                            String oldLocalPath = dbMedia.paths.get(hostName);
+                            Path absolutePath = localPath.toAbsolutePath();
+                            if (absolutePath.toString().equals(oldLocalPath)) {
+                                existsHereCount.incrementAndGet();
+                                if (detailLog) {
+                                    this.log.info("File '{}' already exists", media.getName());
+                                }
+                            } else {
+                                //если это то же устройство, обновим путь при перемещении
+                                dbMedia.paths.putAll(paths);
+                                updatePathsStmt.setString(1, OBJECT_MAPPER.writeValueAsString(dbMedia.paths));
+                                updatePathsStmt.setLong(2, dbMedia.id);
+                                updatePathsStmt.executeUpdate();
+                                updatedCount.incrementAndGet();
+                                this.log.info("File '{}' relocated to new path: {}", dbMedia.name, absolutePath);
+                            }
+                        } else {
+                            existsHereCount.incrementAndGet();
+                            if (detailLog) {
+                                this.log.info("File '{}' already exists", media.getName());
+                            }
+                        }
+                    } else {
                         dbMedia.paths.putAll(paths);
                         updatePathsStmt.setString(1, OBJECT_MAPPER.writeValueAsString(dbMedia.paths));
                         updatePathsStmt.setLong(2, dbMedia.id);
                         updatePathsStmt.executeUpdate();
-                        this.log.info("File '{}' merged with other path: {}", dbMedia.name, toLogPath(paths));
                         updatedCount.incrementAndGet();
-                        return;
+                        this.log.info("File '{}' merged with other path: {}", dbMedia.name, toLogPath(paths));
                     }
-                    Path localPath = media.getLocalPath();
-                    if (localPath != null) {
-                        //если это то же устройство, обновим путь при перемещении
-                        Path absolutePath = localPath.toAbsolutePath();
-                        if (!absolutePath.toString().equals(path)) {
-                            dbMedia.paths.putAll(paths);
-                            updatePathsStmt.setString(1, OBJECT_MAPPER.writeValueAsString(dbMedia.paths));
-                            updatePathsStmt.setLong(2, dbMedia.id);
-                            updatePathsStmt.executeUpdate();
-                            this.log.info("File '{}' relocated to new path: {}", dbMedia.name, absolutePath);
-                            updatedCount.incrementAndGet();
-                            return;
-                        }
-                    }
-                    this.log.info("File '{}' already exists", media.getName());
                 } else if (dbMedia.md5Hash == null) {
                     //допишем в БД md5
                     updateMd5Statement.setString(1, media.getMd5Hash());
                     updateMd5Statement.setLong(2, dbMedia.id);
                     updateMd5Statement.executeUpdate();
-                    this.log.info("File '{}' merged with MD5: {}", dbMedia.name, media.getMd5Hash());
                     updatedCount.incrementAndGet();
+                    this.log.info("File '{}' merged with MD5: {}", dbMedia.name, media.getMd5Hash());
                 } else {
                     //в базе есть хеш, в памяти нет, пропускаем
                 }
             } else {
                 //Разные файлы с одним названием. Новый запишем с новым именем
-                DbMedia dbMediaRenamed = null;
+                DbMedia dbMediaRenamed;
                 String newName = "autorenamed_" + media.getName();
                 int index = 1;
                 do {
@@ -415,7 +427,15 @@ public class PgHelper {
                             newName = "autorenamed_" + index + "_" + dbMedia.name;
                             ++index;
                         } else {
-                            this.log.info("File '{}' already exists", newName);
+                            String pathOnCurrentDevice = media.getPaths().get(hostName);
+                            if (pathOnCurrentDevice == null) {
+                                existsElsewhereCount.incrementAndGet();
+                            } else {
+                                existsHereCount.incrementAndGet();
+                            }
+                            if (detailLog) {
+                                this.log.info("File '{}' already exists", newName);
+                            }
                             return;
                         }
                     }
@@ -478,10 +498,12 @@ public class PgHelper {
 
         private void logFileNotExists(String hostName, DbMedia dbMedia) {
             String path = dbMedia.paths.get(hostName);
-            if (path != null) {
-                log.warn("File '{}' not exists in current device by path: '{}'", dbMedia.name, path);
-            } else {
-                log.warn("File '{}' from another device", dbMedia.name);
+            if (path == null) {
+                existsElsewhereCount.incrementAndGet();
+                if (detailLog) {
+                    Set<String> devices = dbMedia.paths.keySet();
+                    log.warn("File '{}' from another device(s): {}", dbMedia.name, devices);
+                }
             }
         }
     }
